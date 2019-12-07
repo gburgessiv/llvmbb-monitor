@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{error, info};
 use serde::Deserialize;
@@ -220,8 +220,17 @@ async fn bot_event_consumer(mut stream: tokio::sync::mpsc::UnboundedReceiver<Vec
 fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
     let (mut tx, rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
+        let mut start = Instant::now();
         while let Ok(_) = tx.send(()).await {
-            tokio::timer::delay_for(period).await;
+            let ideal_next = start + period;
+            let now = Instant::now();
+
+            start = if now < ideal_next {
+                tokio::timer::delay(ideal_next).await;
+                ideal_next
+            } else {
+                now
+            };
         }
     });
     rx
@@ -236,7 +245,8 @@ async fn main() -> ErrorOr<()> {
 
     tokio::spawn(bot_event_consumer(event_receiver));
     let mut last_latest_builds = None;
-    let mut ticks = new_async_ticker(Duration::from_secs(60));
+    // FIXME: 5min -> 1min. Rn, since this isn't useful to anyone but me, I'm doing 5min.
+    let mut ticks = new_async_ticker(Duration::from_secs(5 * 60));
     while let Some(_) = ticks.recv().await {
         match find_bot_status_deltas(&last_latest_builds, &client).await {
             Ok((mut deltas, new_state)) => {
