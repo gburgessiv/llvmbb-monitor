@@ -138,7 +138,7 @@ struct Build {
 }
 */
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BotEvent {
     // The Vec<BuildNumber> is every event in the bot's (cached) history.
     NewBot(String, Vec<BuildNumber>),
@@ -217,21 +217,33 @@ async fn bot_event_consumer(mut stream: tokio::sync::mpsc::UnboundedReceiver<Vec
     }
 }
 
+fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
+    let (mut tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        while let Ok(_) = tx.send(()).await {
+            tokio::timer::delay_for(period).await;
+        }
+    });
+    rx
+}
+
 #[tokio::main]
 async fn main() -> ErrorOr<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
-
     let client = LLVMLabClient::new("http://lab.llvm.org:8011")?;
 
     let (mut event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     tokio::spawn(bot_event_consumer(event_receiver));
     let mut last_latest_builds = None;
-    loop {
+    let mut ticks = new_async_ticker(Duration::from_secs(60));
+    while let Some(_) = ticks.recv().await {
         match find_bot_status_deltas(&last_latest_builds, &client).await {
-            Ok((deltas, new_state)) => {
+            Ok((mut deltas, new_state)) => {
                 last_latest_builds = Some(new_state);
                 if !deltas.is_empty() {
+                    // Makes downstream output marginally prettier.
+                    deltas.sort();
                     info!("{} changes in buildbots", deltas.len());
                     event_sender
                         .try_send(deltas)
@@ -244,6 +256,6 @@ async fn main() -> ErrorOr<()> {
                 error!("Updating bot statuses failed: {}", x);
             }
         };
-        tokio::timer::delay_for(Duration::from_secs(60)).await;
     }
+    Ok(())
 }
