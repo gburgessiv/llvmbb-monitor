@@ -159,7 +159,7 @@ impl UnabridgedBuildStatus {
         Ok(CompletedBuild {
             id: self.number,
             status: self.results.as_buildbot_result()?,
-            completion_time: completion_time,
+            completion_time,
         })
     }
 }
@@ -281,8 +281,8 @@ where
 {
     fn new(builder_name: &'a str, client: &'a LLVMLabClient, ids: Iter) -> Self {
         Self {
-            builder_name: builder_name,
-            client: client,
+            builder_name,
+            client,
             ids: ids.fuse(),
 
             cache_stack: Vec::new(),
@@ -395,11 +395,11 @@ async fn update_bot_status_with_cached_builds(
         prev_build
     };
 
-    return Ok(BotStatus {
+    Ok(BotStatus {
         first_failing_build: Some(first_failing_build),
         most_recent_build: newest_build,
         state: status.state,
-    });
+    })
 }
 
 async fn fetch_new_bot_status(
@@ -436,11 +436,11 @@ async fn fetch_new_bot_status(
         prev_build = build;
     }
 
-    return Ok(Some(BotStatus {
+    Ok(Some(BotStatus {
         first_failing_build: Some(prev_build),
         most_recent_build: newest_build,
         state: status.state,
-    }));
+    }))
 }
 
 async fn fetch_new_status_snapshot(

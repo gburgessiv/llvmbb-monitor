@@ -3,10 +3,10 @@ use crate::BotStatusSnapshot;
 use crate::BuilderState;
 use crate::FailureOr;
 
-use std::collections::hash_map::Entry;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use log::{error, info, warn};
 use serenity::http::raw::Http;
@@ -420,7 +420,7 @@ impl UIUpdater {
         }
 
         UI {
-            messages: messages,
+            messages,
             force_ping_after_refresh: false,
         }
     }
@@ -459,7 +459,7 @@ pub(crate) fn run(
 ) -> FailureOr<()> {
     let pubsub = Pubsub::new();
     executor.spawn(draw_ui(snapshots, pubsub.clone()));
-    let handler = MessageHandler { pubsub: pubsub };
+    let handler = MessageHandler { pubsub };
     let mut client = serenity::Client::new(token, handler)?;
     client.start()?;
     Ok(())
