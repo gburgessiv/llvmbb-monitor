@@ -1,11 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::iter::Fuse;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{error, info};
+use failure::bail;
+use log::{debug, error, info, warn};
 use serde::Deserialize;
+use tokio::sync::watch;
 
-type ErrorOr<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+mod discord;
+
 type FailureOr<T> = Result<T, failure::Error>;
 
 type BuildNumber = u32;
@@ -69,17 +74,94 @@ impl<'de> Deserialize<'de> for BuilderState {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnabridgedBuilderStatus {
-    #[serde(rename = "basedir")]
-    base_dir: String,
-    // Always sorted in increasing order.
+    category: String,
     cached_builds: Vec<BuildNumber>,
-    // Always sorted in increasing order.
     #[serde(default)]
     current_builds: Vec<BuildNumber>,
-    pending_builds: u32,
-    // Always sorted in lexicographically increasing order.
-    slaves: Vec<String>,
     state: BuilderState,
+}
+
+impl UnabridgedBuilderStatus {
+    fn completed_builds_ascending(&self) -> Vec<BuildNumber> {
+        let running: HashSet<BuildNumber> = self.current_builds.iter().copied().collect();
+        let mut result: Vec<BuildNumber> = self
+            .cached_builds
+            .iter()
+            .copied()
+            .filter(|x| !running.contains(x))
+            .collect();
+        result.sort();
+        result
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, Deserialize)]
+#[serde(transparent)]
+struct RawBuildbotResult(i64);
+
+impl RawBuildbotResult {
+    fn as_buildbot_result(self) -> FailureOr<BuildbotResult> {
+        match self.0 {
+            0 => Ok(BuildbotResult::Success),
+            1 => Ok(BuildbotResult::Warnings),
+            2 => Ok(BuildbotResult::Failure),
+            3 => Ok(BuildbotResult::Skipped),
+            4 => Ok(BuildbotResult::Exception),
+            // 5 is technically 'RETRY'. For our purposes, that's an exception.
+            5 => Ok(BuildbotResult::Exception),
+            n => bail!("{} is an invalid buildbot result", n),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BuildbotResult {
+    Success,
+    Warnings,
+    Failure,
+    // Generally only present in individual steps.
+    Skipped,
+    Exception,
+}
+
+#[derive(Copy, Clone, Debug, Deserialize)]
+#[serde(transparent)]
+struct RawBuildbotTime(f64);
+
+impl RawBuildbotTime {
+    fn as_datetime(self) -> FailureOr<chrono::NaiveDateTime> {
+        let secs = self.0 as i64;
+        let nanos = ((self.0 - secs as f64) * 1_000_000_000f64) as u32;
+        match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
+            Some(x) => Ok(x),
+            None => bail!("invalid timestamp: {}", self.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnabridgedBuildStatus {
+    builder_name: String,
+    number: BuildNumber,
+    #[serde(default)]
+    results: RawBuildbotResult,
+    times: (RawBuildbotTime, Option<RawBuildbotTime>),
+}
+
+impl UnabridgedBuildStatus {
+    fn into_completed_build(self) -> FailureOr<CompletedBuild> {
+        let completion_time: chrono::NaiveDateTime = match self.times.1 {
+            Some(x) => x.as_datetime()?,
+            None => bail!("build has not yet completed"),
+        };
+
+        Ok(CompletedBuild {
+            id: self.number,
+            status: self.results.as_buildbot_result()?,
+            completion_time: completion_time,
+        })
+    }
 }
 
 struct LLVMLabClient {
@@ -116,105 +198,285 @@ impl LLVMLabClient {
         Ok(self.json_get("/json/builders").await?)
     }
 
-    /*
-    async fn fetch_build_status(&self, builder: &str, n: BuildNumber) -> FailureOr<Build> {
-        Ok(self.json_get("/json/builders").await?)
+    async fn fetch_build_statuses(
+        &self,
+        builder: &str,
+        numbers: &[BuildNumber],
+    ) -> FailureOr<Vec<UnabridgedBuildStatus>> {
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut url = format!("/json/builders/{}/builds?", builder);
+        use std::fmt::Write;
+        for (i, n) in numbers.iter().enumerate() {
+            if i != 0 {
+                url.push('&');
+            }
+            write!(url, "select={}", n).unwrap();
+        }
+
+        let mut results: HashMap<String, UnabridgedBuildStatus> = self.json_get(&url).await?;
+        let mut ordered_results: Vec<UnabridgedBuildStatus> = Vec::with_capacity(numbers.len());
+        for number in numbers {
+            match results.remove(&format!("{}", number)) {
+                Some(x) => ordered_results.push(x),
+                None => {
+                    let unique_numbers: HashSet<BuildNumber> = numbers.iter().copied().collect();
+                    if unique_numbers.len() != numbers.len() {
+                        bail!("duplicate build numbers requested: {:?}", numbers);
+                    }
+                    bail!("endpoint failed to return a build for {}", number);
+                }
+            }
+        }
+
+        Ok(ordered_results)
     }
-    */
-}
-
-/*
-#[derive(Clone, Debug)]
-enum BuildStatus {
-    Exception,
-    Failure,
-    Success,
 }
 
 #[derive(Clone, Debug)]
-struct Build {
-    number: BuildNumber,
-    status: BuildStatus,
-}
-*/
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BotEvent {
-    // The Vec<BuildNumber> is every event in the bot's (cached) history.
-    NewBot(String, Vec<BuildNumber>),
-    NewBuilds(String, Vec<BuildNumber>),
-    RemovedBot(String),
+struct CompletedBuild {
+    id: BuildNumber,
+    status: BuildbotResult,
+    completion_time: chrono::NaiveDateTime,
 }
 
-async fn find_bot_status_deltas(
-    last_latest_builds: &Option<HashMap<String, BuildNumber>>,
-    client: &LLVMLabClient,
-) -> FailureOr<(Vec<BotEvent>, HashMap<String, BuildNumber>)> {
-    let bot_statuses = client.fetch_full_builder_status().await?;
+#[derive(Clone, Debug)]
+struct BotStatus {
+    // If the most_recent_build is red, this'll be the first build we know of that failed.
+    first_failing_build: Option<CompletedBuild>,
+    most_recent_build: CompletedBuild,
+    state: BuilderState,
+}
 
-    let mut new_latest_builds: HashMap<String, BuildNumber> = HashMap::new();
-    let mut events: Vec<BotEvent> = Vec::new();
-    let mut unmentioned_bots: HashSet<&String>;
-    if let Some(latest) = last_latest_builds {
-        unmentioned_bots = latest.keys().collect();
-    } else {
-        unmentioned_bots = HashSet::new();
-    };
+#[derive(Clone, Debug)]
+struct Bot {
+    category: String,
+    status: BotStatus,
+}
 
-    for (bot_name, status) in bot_statuses.into_iter() {
-        // If it has no builds, it's effectively dead to us.
-        let latest_build = match status.cached_builds.iter().max() {
-            Some(x) => *x,
-            None => continue,
+#[derive(Clone, Debug, Default)]
+struct BotStatusSnapshot {
+    bots: HashMap<String, Bot>,
+}
+
+struct BuildStream<'a, Iter>
+where
+    Iter: Iterator<Item = BuildNumber>,
+{
+    builder_name: &'a str,
+    client: &'a LLVMLabClient,
+    ids: Fuse<Iter>,
+
+    // We batch requests behind the scenes. Most requests only get the first few builds, but can
+    // walk back potentially for > 50.
+    cache_stack: Vec<CompletedBuild>,
+    num_fetched: usize,
+}
+
+impl<'a, Iter> BuildStream<'a, Iter>
+where
+    Iter: Iterator<Item = BuildNumber>,
+{
+    fn new(builder_name: &'a str, client: &'a LLVMLabClient, ids: Iter) -> Self {
+        Self {
+            builder_name: builder_name,
+            client: client,
+            ids: ids.fuse(),
+
+            cache_stack: Vec::new(),
+            num_fetched: 0,
+        }
+    }
+
+    async fn fill_cache_stack(&mut self) -> FailureOr<Option<usize>> {
+        assert!(self.cache_stack.is_empty());
+
+        // Arbitrary limits that Should Be Good Enough.
+        let num_to_fetch = if self.num_fetched == 0 {
+            2
+        } else {
+            std::cmp::min(self.num_fetched * 2, 16)
         };
 
-        unmentioned_bots.remove(&bot_name);
-        if let Some(ref l) = last_latest_builds {
-            if let Some(latest_build) = l.get(&bot_name) {
-                let running_builds: HashSet<_> = status.current_builds.iter().map(|x| *x).collect();
-                let new_builds: Vec<_> = status
-                    .cached_builds
-                    .iter()
-                    .map(|x| *x)
-                    .filter(|x| x > latest_build && !running_builds.contains(x))
-                    .collect();
-                if !new_builds.is_empty() {
-                    events.push(BotEvent::NewBuilds(bot_name.clone(), new_builds));
-                }
-            } else {
-                events.push(BotEvent::NewBot(bot_name.clone(), status.cached_builds));
-            }
-        } else {
-            events.push(BotEvent::NewBot(bot_name.clone(), status.cached_builds));
+        let to_fetch: Vec<BuildNumber> = (&mut self.ids).take(num_to_fetch).collect();
+        if to_fetch.is_empty() {
+            return Ok(None);
         }
 
-        new_latest_builds.insert(bot_name, latest_build);
+        self.num_fetched += to_fetch.len();
+        debug!("Fetching builds {}/{:?}", self.builder_name, to_fetch);
+
+        let statuses = self
+            .client
+            .fetch_build_statuses(self.builder_name, &to_fetch)
+            .await?;
+
+        for status in statuses {
+            let id = status.number;
+            match status.into_completed_build() {
+                Ok(a) => {
+                    self.cache_stack.push(a);
+                }
+                Err(x) => {
+                    error!(
+                        "Failed decoding build result for {}/{}: {}",
+                        self.builder_name, id, x
+                    );
+                }
+            }
+        }
+
+        // next() pops from the back.
+        self.cache_stack.reverse();
+        Ok(Some(to_fetch.len()))
     }
 
-    for bot in unmentioned_bots {
-        events.push(BotEvent::RemovedBot(bot.clone()));
+    async fn next(&mut self) -> FailureOr<Option<CompletedBuild>> {
+        loop {
+            if let Some(x) = self.cache_stack.pop() {
+                return Ok(Some(x));
+            }
+
+            if self.fill_cache_stack().await?.is_none() {
+                return Ok(None);
+            }
+        }
     }
-    Ok((events, new_latest_builds))
 }
 
-// Use an unbounded channel because honestly, this is going to get a single message per minute,
-// tops. If we OOM, something was beyond seriously wrong.
-async fn bot_event_consumer(mut stream: tokio::sync::mpsc::UnboundedReceiver<Vec<BotEvent>>) {
-    while let Some(event_list) = stream.recv().await {
-        for event in event_list {
-            match event {
-                BotEvent::NewBot(bot_name, _) => {
-                    info!("New bot added: {}", bot_name);
-                }
-                BotEvent::NewBuilds(bot_name, builds) => {
-                    info!("New build(s) detected: {}/{:?}", bot_name, builds);
-                }
-                BotEvent::RemovedBot(bot_name) => {
-                    info!("Bot removed: {}", bot_name);
-                }
-            }
-        }
+// Skipping unparseable builds adds some really awkward (e.g., broken) properties here, but the
+// hope is that those builds will be super rare, and we should _try_ to make progress even in the
+// face of those, rather than falling over forever.
+
+async fn update_bot_status_with_cached_builds(
+    client: &LLVMLabClient,
+    builder: &str,
+    status: &UnabridgedBuilderStatus,
+    previous: &BotStatus,
+) -> FailureOr<BotStatus> {
+    let new_builds: Vec<BuildNumber> = {
+        let mut all_builds = status.completed_builds_ascending();
+        all_builds.retain(|x| *x > previous.most_recent_build.id);
+        all_builds
+    };
+
+    let mut build_stream = BuildStream::new(builder, client, new_builds.into_iter().rev());
+    let newest_build = match build_stream.next().await? {
+        None => return Ok(previous.clone()),
+        Some(x) => x,
+    };
+
+    let is_successful_status = |s| s == BuildbotResult::Success || s == BuildbotResult::Warnings;
+    if is_successful_status(newest_build.status) {
+        return Ok(BotStatus {
+            first_failing_build: None,
+            most_recent_build: newest_build,
+            state: status.state,
+        });
     }
+
+    let mut prev_build = newest_build.clone();
+    let mut found_success = false;
+    while let Some(build) = build_stream.next().await? {
+        if is_successful_status(build.status) {
+            found_success = true;
+            break;
+        }
+        prev_build = build;
+    }
+
+    let first_failing_build = if found_success {
+        prev_build
+    } else if let Some(ref b) = previous.first_failing_build {
+        b.clone()
+    } else {
+        prev_build
+    };
+
+    return Ok(BotStatus {
+        first_failing_build: Some(first_failing_build),
+        most_recent_build: newest_build,
+        state: status.state,
+    });
+}
+
+async fn fetch_new_bot_status(
+    client: &LLVMLabClient,
+    builder: &str,
+    status: &UnabridgedBuilderStatus,
+) -> FailureOr<Option<BotStatus>> {
+    // Fetching incrementally is helpful above, but some bots are broken pretty often upstream.
+    // Grabbing their status one by one can take forever, which slows down startup quite a bit (and
+    // probs places a lot of undue load on the server), so we fetch them all.
+
+    // impl Iterator<Item = CompletedBuild>
+    let new_builds = status.completed_builds_ascending();
+    let mut build_stream = BuildStream::new(builder, client, new_builds.into_iter().rev());
+    let newest_build = match build_stream.next().await? {
+        None => return Ok(None),
+        Some(x) => x,
+    };
+
+    let is_successful_status = |s| s == BuildbotResult::Success || s == BuildbotResult::Warnings;
+    if is_successful_status(newest_build.status) {
+        return Ok(Some(BotStatus {
+            first_failing_build: None,
+            most_recent_build: newest_build,
+            state: status.state,
+        }));
+    }
+
+    let mut prev_build = newest_build.clone();
+    while let Some(build) = build_stream.next().await? {
+        if is_successful_status(build.status) {
+            break;
+        }
+        prev_build = build;
+    }
+
+    return Ok(Some(BotStatus {
+        first_failing_build: Some(prev_build),
+        most_recent_build: newest_build,
+        state: status.state,
+    }));
+}
+
+async fn fetch_new_status_snapshot(
+    client: &LLVMLabClient,
+    prev: &BotStatusSnapshot,
+) -> FailureOr<BotStatusSnapshot> {
+    let bot_statuses = client.fetch_full_builder_status().await?;
+
+    let mut new_bots: HashMap<String, Bot> = HashMap::new();
+    for (bot_name, status) in bot_statuses.into_iter() {
+        // This _could_ be done in independent tasks, but we only do a lot of queries and such on
+        // startup, and even that only takes ~2-3s to go through.
+        let new_status = if let Some(last_bot) = prev.bots.get(&bot_name) {
+            update_bot_status_with_cached_builds(client, &bot_name, &status, &last_bot.status)
+                .await?
+        } else {
+            match fetch_new_bot_status(client, &bot_name, &status).await? {
+                // If the bot has no builds, it's effectively dead to us.
+                None => {
+                    debug!("Ignoring {}; it has no builds", bot_name);
+                    continue;
+                }
+                Some(x) => x,
+            }
+        };
+
+        new_bots.insert(
+            bot_name,
+            Bot {
+                category: status.category,
+                status: new_status,
+            },
+        );
+    }
+
+    Ok(BotStatusSnapshot { bots: new_bots })
 }
 
 fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
@@ -236,36 +498,53 @@ fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
     rx
 }
 
-#[tokio::main]
-async fn main() -> ErrorOr<()> {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
-    let client = LLVMLabClient::new("http://lab.llvm.org:8011")?;
+async fn publish_forever(
+    client: LLVMLabClient,
+    notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
+) {
+    let mut ticks = new_async_ticker(Duration::from_secs(60));
+    let mut last_snapshot = Arc::new(BotStatusSnapshot::default());
+    loop {
+        ticks.recv().await.expect("ticker shut down unexpectedly");
+        match fetch_new_status_snapshot(&client, &last_snapshot).await {
+            Ok(snapshot) => {
+                last_snapshot = Arc::new(snapshot);
+                info!(
+                    "Snapshot with {} bots ({} success / {} failures) updated successfully.",
+                    last_snapshot.bots.len(),
+                    last_snapshot
+                        .bots
+                        .values()
+                        .filter(|x| x.status.first_failing_build.is_none())
+                        .count(),
+                    last_snapshot
+                        .bots
+                        .values()
+                        .filter(|x| x.status.first_failing_build.is_some())
+                        .count(),
+                );
 
-    let (mut event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-    tokio::spawn(bot_event_consumer(event_receiver));
-    let mut last_latest_builds = None;
-    // FIXME: 5min -> 1min. Rn, since this isn't useful to anyone but me, I'm doing 5min.
-    let mut ticks = new_async_ticker(Duration::from_secs(5 * 60));
-    while let Some(_) = ticks.recv().await {
-        match find_bot_status_deltas(&last_latest_builds, &client).await {
-            Ok((mut deltas, new_state)) => {
-                last_latest_builds = Some(new_state);
-                if !deltas.is_empty() {
-                    // Makes downstream output marginally prettier.
-                    deltas.sort();
-                    info!("{} changes in buildbots", deltas.len());
-                    event_sender
-                        .try_send(deltas)
-                        .expect("Other end should never close before us");
-                } else {
-                    info!("No changes in buildbots");
+                if notifications.broadcast(Some(last_snapshot.clone())).is_err() {
+                    warn!("All lab handles are closed; shutting down publishing loop");
                 }
             }
             Err(x) => {
-                error!("Updating bot statuses failed: {}", x);
+                error!("Updating bot statuses failed: {}\n{}", x, x.backtrace());
             }
         };
     }
-    Ok(())
+}
+
+fn main() -> FailureOr<()> {
+    simple_logger::init_with_level(log::Level::Info).unwrap();
+    let discord_token = std::fs::read_to_string("./token")?;
+    let client = LLVMLabClient::new("http://lab.llvm.org:8011")?;
+    let tokio_rt = tokio::runtime::Runtime::new()?;
+    let (snapshots_tx, snapshots_rx) = watch::channel(None);
+
+    if true {
+        tokio_rt.spawn(publish_forever(client, snapshots_tx));
+    }
+
+    discord::run(&discord_token, snapshots_rx, tokio_rt.executor())
 }
