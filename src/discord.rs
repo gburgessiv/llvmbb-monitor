@@ -18,7 +18,7 @@ use tokio::sync::watch;
 
 struct PubsubData<T> {
     data: Option<T>,
-    version: u32,
+    version: u64,
 }
 
 struct Pubsub<T>
@@ -63,7 +63,7 @@ where
     T: Clone,
 {
     pubsub: Arc<Pubsub<T>>,
-    version: u32,
+    version: u64,
 }
 
 impl<T> PubsubReader<T>
@@ -77,6 +77,12 @@ where
         }
         self.version = data.version;
         data.data.as_ref().unwrap().clone()
+    }
+
+    /// Allows us to reread the current value on our next next() call, if a value has been supplied
+    /// to this Pubsub already.
+    fn reset(&mut self) {
+        self.version = 0;
     }
 }
 
@@ -312,6 +318,8 @@ impl serenity::client::EventHandler for MessageHandler {
                 if should_exit() {
                     break;
                 }
+
+                pubsub_reader.reset();
             }
 
             info!("Shut down serving for #{}", guild_id);
