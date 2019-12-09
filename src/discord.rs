@@ -7,6 +7,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use log::{error, info, warn};
 use serenity::http::raw::Http;
@@ -292,6 +293,7 @@ impl serenity::client::EventHandler for MessageHandler {
             };
 
             loop {
+                info!("Setting up serving for guild #{}", guild_id);
                 if let Err(x) =
                     serve_channel(&*http, my_channel_id, &mut pubsub_reader, &mut should_exit)
                 {
@@ -299,10 +301,20 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
 
                 if should_exit() {
-                    info!("Shut down serving for #{}", guild_id);
-                    return;
+                    break;
+                }
+
+                // If we're seeing errors, it's probs best to sit back for a bit.
+                std::thread::sleep(Duration::from_secs(30));
+
+                // Double-check this, since there's a chance we saw errors related to an in-flight
+                // shutdown notice.
+                if should_exit() {
+                    break;
                 }
             }
+
+            info!("Shut down serving for #{}", guild_id);
         });
     }
 
