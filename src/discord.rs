@@ -3,7 +3,7 @@ use crate::BotStatusSnapshot;
 use crate::BuilderState;
 use crate::FailureOr;
 
-
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
@@ -79,16 +79,54 @@ where
     }
 }
 
+/// So we get 0 guarantees about the relative ordering of
+/// guild_create/guild_unavailable/guild_delete. All of those events are simply yeeted to our
+/// threadpool.
+///
+/// So we have refcounts. These refcounts can go negative. It's great.
+///
+/// Grumbling aside, the core idea is that it's up to the server for a channel to periodically poll
+/// its refcount. If its refcount is <= 0, it should remove itself from the refcounts and exit
+/// immediately.
+///
+/// Refcounts can go negative with everyone's favorite racing GuildUnavailable <=> GuildCreate
+/// spam. If a GuildUnavailable arrives before the GuildCreate that was intended to preceed it, ...
+///
+/// The important property here is that we never try to make the thread serving the guild fall
+/// over, or wait for it to do so. In a GuildCreate/GuildUnavailable storm, that's Very Desirable.
+/// Plus, since these threads should serve the same function (a new one just adds in another
+/// channel setup phase), 'missing' a shutdown in such conditions isn't problematic.
+///
+/// Also, sharp edges: refcounts aren't atomic members stashed somewhere because that's more subtle
+/// than this; you have to check the atomic, then if it's bad, come in here and check again
+/// (otherwise if the atomic bumps to > 0 before you get to remove yourself from the hashmap, ...).
+/// This is code that's incredibly unlikely to be exercised meaningfully but once in a blue moon.
+/// Subtlety is expensive.
+#[derive(Default)]
+struct GuildServerState {
+    /// Refcounts for live servers.
+    ///
+    /// If orphan_refcounts has a GuildId, this shall not have a matching one.
+    server_refcounts: HashMap<GuildId, isize>,
 
-struct MessageHandler {
-    pubsub: Arc<Pubsub<Arc<UI>>>,
+    /// If a server exited with a negative refcount, this will contain that refcount negated.
+    /// GuildCreates should not proceed to create a handler until the value here is 0 (or not
+    /// present). Similarly, if we get a decref for a server that isn't in server_refcounts, this
+    /// gets bumped.
+    ///
+    /// If server_refcounts has a GuildId, this shall not have a matching one.
+    orphan_refcounts: HashMap<GuildId, usize>,
 }
 
-fn serve_channel(
+fn serve_channel<F>(
     http: &Http,
     channel_id: ChannelId,
-    mut ui: PubsubReader<Arc<UI>>,
-) -> FailureOr<()> {
+    ui: &mut PubsubReader<Arc<UI>>,
+    should_exit: &mut F,
+) -> FailureOr<()>
+where
+    F: FnMut() -> bool,
+{
     // First, delete all of the messages in the channel.
     info!("Removing existing messages in {}", channel_id);
     loop {
@@ -147,13 +185,60 @@ fn serve_channel(
             channel_id.delete_message(http, ping_message.id)?;
         }
 
+        if should_exit() {
+            return Ok(());
+        }
+
         current_ui = ui.next();
+    }
+}
+
+struct MessageHandler {
+    pubsub: Arc<Pubsub<Arc<UI>>>,
+    // The readonly distribution here makes an RwMutex more appropriate in theory, but there're
+    // going to be two threads polling this ~minutely. So let's prefer simpler code.
+    servers: Arc<Mutex<GuildServerState>>,
+}
+
+impl MessageHandler {
+    fn decref_guild_server(&self, id: GuildId) {
+        let mut servers = self.servers.lock().unwrap();
+        match servers.server_refcounts.get_mut(&id) {
+            Some(x) => {
+                *x -= 1;
+            }
+            None => {
+                *servers.orphan_refcounts.entry(id).or_default() += 1;
+            }
+        }
     }
 }
 
 impl serenity::client::EventHandler for MessageHandler {
     fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
         info!("Guild #{} ({}) has been created", guild.id, guild.name);
+
+        let guild_id = guild.id;
+        {
+            let mut servers = self.servers.lock().unwrap();
+            if let Entry::Occupied(mut x) = servers.orphan_refcounts.entry(guild_id) {
+                *x.get_mut() -= 1;
+                if *x.get() == 0 {
+                    x.remove();
+                }
+                return;
+            }
+
+            match servers.server_refcounts.entry(guild_id) {
+                Entry::Occupied(mut x) => {
+                    *x.get_mut() += 1;
+                    return;
+                }
+                Entry::Vacant(x) => {
+                    x.insert(1);
+                }
+            }
+        }
 
         let my_channel_name = "llvmbb";
         let my_channel_id: ChannelId = match guild
@@ -164,28 +249,63 @@ impl serenity::client::EventHandler for MessageHandler {
             .next()
         {
             Some(x) => {
-                info!("Identified #{} as my channel in #{}", x, guild.id);
+                info!("Identified #{} as my channel in #{}", x, guild_id);
                 *x
             }
             None => {
-                error!("No {} channel in #{}; quit", my_channel_name, guild.id);
+                error!("No {} channel in #{}; quit", my_channel_name, guild_id);
                 return;
             }
         };
 
         let http = ctx.http;
-        let guild_id = guild.id;
-        let pubsub_reader = Pubsub::reader(&self.pubsub);
+        let mut pubsub_reader = Pubsub::reader(&self.pubsub);
+        let guild_state = self.servers.clone();
         std::thread::spawn(move || {
-            if let Err(x) = serve_channel(&*http, my_channel_id, pubsub_reader) {
-                error!("Failed serving guild #{}: {}", guild_id, x);
-            } else {
-                info!("Shut down serving for #{}", guild_id);
+            let mut responded_with_yes = false;
+            let mut should_exit = move || {
+                if responded_with_yes {
+                    return true;
+                }
+
+                let mut state = guild_state.lock().unwrap();
+                match state.server_refcounts.entry(guild_id) {
+                    Entry::Vacant(_) => {
+                        unreachable!("Guilds should always have an entry in the refcount table");
+                    }
+                    Entry::Occupied(x) => {
+                        let val = *x.get();
+                        if val > 0 {
+                            return false;
+                        }
+
+                        x.remove();
+                        if val < 0 {
+                            let uval = -val as usize;
+                            state.orphan_refcounts.insert(guild_id, uval);
+                        }
+
+                        responded_with_yes = true;
+                        return true;
+                    }
+                }
+            };
+
+            loop {
+                if let Err(x) =
+                    serve_channel(&*http, my_channel_id, &mut pubsub_reader, &mut should_exit)
+                {
+                    error!("Failed serving guild #{}: {}", guild_id, x);
+                }
+
+                if should_exit() {
+                    info!("Shut down serving for #{}", guild_id);
+                    return;
+                }
             }
         });
     }
 
-    // FIXME: Make these useful
     fn guild_delete(
         &self,
         _ctx: Context,
@@ -193,10 +313,12 @@ impl serenity::client::EventHandler for MessageHandler {
         _full_data: Option<Arc<RwLock<Guild>>>,
     ) {
         info!("Guild #{} has been deleted", incomplete_guild.id);
+        self.decref_guild_server(incomplete_guild.id);
     }
 
     fn guild_unavailable(&self, _ctx: Context, guild_id: GuildId) {
         warn!("Guild #{} is now unavailable", guild_id);
+        self.decref_guild_server(guild_id);
     }
 }
 
@@ -204,6 +326,8 @@ impl serenity::client::EventHandler for MessageHandler {
 /// immutable.
 #[derive(Clone)]
 struct UI {
+    // FIXME: This pre-splitting is silly. If there's a split, it should be need-based (e.g.,
+    // nearing the 2K codepoint limit), rather than arbitrarily based on hope.
     messages: Vec<String>,
     // FIXME: This is broken if a client drops a message. This should be more of a sticky bit for
     // each client. Maybe integrating pubsub more deeply is gonna be necessary...
@@ -211,26 +335,25 @@ struct UI {
 }
 
 #[derive(Debug, Default)]
-struct UIUpdater {}
+struct UIUpdater;
 
-    fn duration_to_shorthand(dur: chrono::Duration) -> String {
-        if dur < chrono::Duration::seconds(60) {
-            return "<1 minute".into();
-        }
-        if dur < chrono::Duration::minutes(60) {
-            let m = dur.num_minutes();
-            return format!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
-        }
-        if dur < chrono::Duration::days(1) {
-            let h = dur.num_hours();
-            return format!("{} {}", h, if h == 1 { "hour" } else { "hours" });
-        }
-        if dur < chrono::Duration::days(28) {
-            return format!("{} days", dur.num_days());
-        }
-        return format!("{} weeks", dur.num_weeks());
+fn duration_to_shorthand(dur: chrono::Duration) -> String {
+    if dur < chrono::Duration::seconds(60) {
+        return "<1 minute".into();
     }
-
+    if dur < chrono::Duration::minutes(60) {
+        let m = dur.num_minutes();
+        return format!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
+    }
+    if dur < chrono::Duration::days(1) {
+        let h = dur.num_hours();
+        return format!("{} {}", h, if h == 1 { "hour" } else { "hours" });
+    }
+    if dur < chrono::Duration::days(28) {
+        return format!("{} days", dur.num_days());
+    }
+    return format!("{} weeks", dur.num_weeks());
+}
 
 type NamedBot<'a> = (&'a str, &'a Bot);
 
@@ -462,7 +585,10 @@ pub(crate) fn run(
 ) -> FailureOr<()> {
     let pubsub = Pubsub::new();
     executor.spawn(draw_ui(snapshots, pubsub.clone()));
-    let handler = MessageHandler { pubsub };
+    let handler = MessageHandler {
+        pubsub: pubsub,
+        servers: Default::default(),
+    };
     let mut client = serenity::Client::new(token, handler)?;
     client.start()?;
     Ok(())
