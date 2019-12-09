@@ -15,6 +15,71 @@ use serenity::prelude::*;
 use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
+struct PubsubData<T> {
+    data: Option<T>,
+    version: u32,
+}
+
+struct Pubsub<T>
+where
+    T: Clone,
+{
+    data: Mutex<PubsubData<T>>,
+    cond: std::sync::Condvar,
+}
+
+impl<T> Pubsub<T>
+where
+    T: Clone,
+{
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            data: Mutex::new(PubsubData {
+                data: None,
+                version: 0,
+            }),
+            cond: Default::default(),
+        })
+    }
+
+    fn publish(&self, value: T) {
+        let mut data = self.data.lock().unwrap();
+        data.data = Some(value);
+        data.version += 1;
+        self.cond.notify_all();
+    }
+
+    fn reader(me: &Arc<Self>) -> PubsubReader<T> {
+        PubsubReader {
+            pubsub: me.clone(),
+            version: 0,
+        }
+    }
+}
+
+struct PubsubReader<T>
+where
+    T: Clone,
+{
+    pubsub: Arc<Pubsub<T>>,
+    version: u32,
+}
+
+impl<T> PubsubReader<T>
+where
+    T: Clone,
+{
+    fn next(&mut self) -> T {
+        let mut data = self.pubsub.data.lock().unwrap();
+        while data.version == self.version {
+            data = self.pubsub.cond.wait(data).unwrap();
+        }
+        self.version = data.version;
+        data.data.as_ref().unwrap().clone()
+    }
+}
+
+
 struct MessageHandler {
     pubsub: Arc<Pubsub<Arc<UI>>>,
 }
@@ -135,70 +200,6 @@ impl serenity::client::EventHandler for MessageHandler {
     }
 }
 
-struct PubsubData<T> {
-    data: Option<T>,
-    version: u32,
-}
-
-struct Pubsub<T>
-where
-    T: Clone,
-{
-    data: Mutex<PubsubData<T>>,
-    cond: std::sync::Condvar,
-}
-
-impl<T> Pubsub<T>
-where
-    T: Clone,
-{
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            data: Mutex::new(PubsubData {
-                data: None,
-                version: 0,
-            }),
-            cond: Default::default(),
-        })
-    }
-
-    fn publish(&self, value: T) {
-        let mut data = self.data.lock().unwrap();
-        data.data = Some(value);
-        data.version += 1;
-        self.cond.notify_all();
-    }
-
-    fn reader(me: &Arc<Self>) -> PubsubReader<T> {
-        PubsubReader {
-            pubsub: me.clone(),
-            version: 0,
-        }
-    }
-}
-
-struct PubsubReader<T>
-where
-    T: Clone,
-{
-    pubsub: Arc<Pubsub<T>>,
-    version: u32,
-}
-
-impl<T> PubsubReader<T>
-where
-    T: Clone,
-{
-    fn next(&mut self) -> T {
-        let mut data = self.pubsub.data.lock().unwrap();
-        while data.version == self.version {
-            data = self.pubsub.cond.wait(data).unwrap();
-        }
-        self.version = data.version;
-        data.data.as_ref().unwrap().clone()
-    }
-}
-
 /// The UI is basically what should be sent at any given time. Once a UI is published, it's
 /// immutable.
 #[derive(Clone)]
@@ -231,10 +232,12 @@ struct UIUpdater {}
     }
 
 
+type NamedBot<'a> = (&'a str, &'a Bot);
+
 impl UIUpdater {
     fn categorize_bots<'a>(
         snapshot: &'a BotStatusSnapshot,
-    ) -> (Vec<(&'a str, Vec<(&'a str, &'a Bot)>)>, usize) {
+    ) -> (Vec<(&'a str, Vec<NamedBot<'a>>)>, usize) {
         let mut categories: HashMap<&'a str, HashMap<&'a str, &'a Bot>> = HashMap::new();
         let mut skipped = 0usize;
         for (name, bot) in &snapshot.bots {
