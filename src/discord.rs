@@ -377,7 +377,7 @@ const DISCORD_MESSAGE_SIZE_LIMIT: usize = 1900;
 /// Similarly, Discord trims messages ( :( ), so it's generally hoped/expected that logical
 /// sections will have bold headers or something to differentiate them.
 fn split_message(message: String, size_limit: usize) -> Vec<String> {
-    debug_assert!(size_limit != 0);
+    assert!(size_limit != 0);
 
     // Cheap check for the overwhelmingly common case.
     if message.len() < size_limit {
@@ -401,13 +401,29 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
 
         let this_chunk: &str = &remaining_message[..size_threshold];
 
-        // FIXME: Ideally, this should go out of its way to differentiate between "\n\n" and a
-        // regular "\n". Preferring the latter is better, since Discord trims messages, so "\n\n"
-        // will be 'collapsed' into effectively "\n".
-        let end_index = this_chunk
-            .rfind("\n")
-            .or_else(|| this_chunk.rfind(|c: char| c.is_whitespace()))
-            .unwrap_or(size_threshold);
+        let end_index = match this_chunk.rfind("\n") {
+            Some(backest_index) => {
+                // Go hunting a bit to see if we can find a \n that isn't preceeded by another \n.
+                let mut candidate = Some(backest_index);
+                while let Some(i) = candidate {
+                    if !this_chunk[..i].ends_with('\n') {
+                        break;
+                    }
+
+                    let first_non_newline = match this_chunk[..i].rfind(|x| x != '\n') {
+                        None => break,
+                        Some(i) => i,
+                    };
+
+                    candidate = this_chunk[..first_non_newline].rfind('\n');
+                }
+
+                candidate.unwrap_or(backest_index)
+            }
+            None => this_chunk
+                .rfind(|c: char| c.is_whitespace())
+                .unwrap_or(size_threshold),
+        };
 
         let (this_piece, rest) = remaining_message.split_at(end_index);
         result.push(this_piece.to_owned());
@@ -598,7 +614,7 @@ impl UIUpdater {
                 .iter()
                 .filter_map(|(name, bot)| match &bot.status.first_failing_build {
                     None => None,
-                    Some(x) => Some((*name, x.completion_time)),
+                    Some(x) => Some((*name, x.completion_time, x.id)),
                 })
                 .collect();
 
@@ -606,12 +622,12 @@ impl UIUpdater {
                 continue;
             }
 
-            failed_bots.sort_by_key(|&(_, first_failed_time)| first_failed_time);
+            failed_bots.sort_by_key(|&(_, first_failed_time, _)| first_failed_time);
             failed_bots.reverse();
 
             let mut this_message = String::new();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
-            for (bot_name, first_failed_time) in failed_bots {
+            for (bot_name, first_failed_time, first_failed_id) in failed_bots {
                 let time_broken: String = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
@@ -624,8 +640,8 @@ impl UIUpdater {
 
                 write!(
                     this_message,
-                    "\n- For {}: http://lab.llvm.org:8011/builders/{}",
-                    time_broken, bot_name,
+                    "\n- For {}: http://lab.llvm.org:8011/builders/{}\n   - First failure: http://lab.llvm.org:8011/builders/{}/builds/{}",
+                    time_broken, bot_name, bot_name, first_failed_id
                 )
                 .unwrap();
             }
@@ -739,5 +755,8 @@ mod test {
         assert_eq!(checked_split_message("a\nb c", 4), &["a", "b c"]);
         assert_eq!(checked_split_message("a b\nc", 4), &["a b", "c"]);
         assert_eq!(checked_split_message("a\nb\nc", 4), &["a\nb", "c"]);
+
+        assert_eq!(checked_split_message("a\n\nb\ncd", 6), &["a\n\nb", "cd"]);
+        assert_eq!(checked_split_message("a\nb\n\ncd", 6), &["a", "b\n\ncd"]);
     }
 }
