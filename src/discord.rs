@@ -495,7 +495,7 @@ impl UIUpdater {
 
         let num_red_bots = all_bots.filter(|&bot| is_bot_red(bot)).count();
         let mut result = String::new();
-        result += "**Bot summary**";
+        result += "**Bot summary:**";
         write!(
             result,
             "\n{} of {} online bots are broken",
@@ -636,7 +636,7 @@ impl UIUpdater {
         push_section({
             let mut final_section = String::new();
 
-            final_section += "**Meta**";
+            final_section += "**Meta:**";
             if num_offline > 0 {
                 write!(
                     final_section,
