@@ -384,6 +384,14 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
         return vec![message];
     }
 
+    // FIXME: in order for this to work on more general input (e.g., anything with indents), it has
+    // to take those indents into account. A split between:
+    //
+    // foo
+    //   bar
+    //
+    // will have discord trim the `bar` part.
+
     let mut result = Vec::new();
     let mut remaining_message = message.as_str();
     while !remaining_message.is_empty() {
@@ -627,7 +635,8 @@ impl UIUpdater {
 
             let mut this_message = String::new();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
-            for (bot_name, first_failed_time, first_failed_id) in failed_bots {
+            // FIXME: Is funnelling first_failed_id in somehow good?
+            for (bot_name, first_failed_time, _first_failed_id) in failed_bots {
                 let time_broken: String = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
@@ -640,8 +649,8 @@ impl UIUpdater {
 
                 write!(
                     this_message,
-                    "\n- For {}: http://lab.llvm.org:8011/builders/{}\n   - First failure: http://lab.llvm.org:8011/builders/{}/builds/{}",
-                    time_broken, bot_name, bot_name, first_failed_id
+                    "\n- For {}: http://lab.llvm.org:8011/builders/{}",
+                    time_broken, bot_name
                 )
                 .unwrap();
             }
