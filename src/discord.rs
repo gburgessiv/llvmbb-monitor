@@ -187,6 +187,12 @@ where
             });
         }
 
+        debug_assert!(current_ui.messages.len() <= existing_messages.len());
+        for _ in current_ui.messages.len()..existing_messages.len() {
+            let id = existing_messages.pop().unwrap().id;
+            channel_id.delete_message(http, id)?;
+        }
+
         if current_ui.force_ping_after_refresh && !sent_message {
             let ping_message = channel_id.send_message(http, |m| m.content("friendly ping"))?;
             channel_id.delete_message(http, ping_message.id)?;
@@ -346,16 +352,69 @@ impl serenity::client::EventHandler for MessageHandler {
 /// immutable.
 #[derive(Clone)]
 struct UI {
-    // FIXME: This pre-splitting is silly. If there's a split, it should be need-based (e.g.,
-    // nearing the 2K codepoint limit), rather than arbitrarily based on hope.
     messages: Vec<String>,
     // FIXME: This is broken if a client drops a message. This should be more of a sticky bit for
     // each client. Maybe integrating pubsub more deeply is gonna be necessary...
     force_ping_after_refresh: bool,
 }
 
-#[derive(Debug, Default)]
-struct UIUpdater;
+// It's actually 2K chars, but I'd prefer premature splitting over off-by-a-littles
+const DISCORD_MESSAGE_SIZE_LIMIT: usize = 1900;
+
+/// Discord has a character limit for messages. This function splits at that limit.
+///
+/// This tries to split on a number of things:
+/// - single newlines
+/// - spaces
+/// - character boundaries
+///
+/// In that order. If the last one fails, we have been forsaken, and that's OK.
+///
+/// In theory, in general, there are many things wrong with this implementation. (Breaking up of
+/// multiline code blocks, lack of caring about grapheme clusters, etc.) In practice, no single
+/// line should get anywhere near Discord's size limit.
+///
+/// Similarly, Discord trims messages ( :( ), so it's generally hoped/expected that logical
+/// sections will have bold headers or something to differentiate them.
+fn split_message(message: String, size_limit: usize) -> Vec<String> {
+    debug_assert!(size_limit != 0);
+
+    // Cheap check for the overwhelmingly common case.
+    if message.len() < size_limit {
+        return vec![message];
+    }
+
+    let mut result = Vec::new();
+    let mut remaining_message = message.as_str();
+    while !remaining_message.is_empty() {
+        let size_threshold = match remaining_message.char_indices().skip(size_limit).next() {
+            Some((end_index, _)) => end_index,
+            None => {
+                // Peephole for if the above message.len() check was too conservative.
+                if result.is_empty() {
+                    return vec![message];
+                }
+                result.push(remaining_message.to_owned());
+                break;
+            }
+        };
+
+        let this_chunk: &str = &remaining_message[..size_threshold];
+
+        // FIXME: Ideally, this should go out of its way to differentiate between "\n\n" and a
+        // regular "\n". Preferring the latter is better, since Discord trims messages, so "\n\n"
+        // will be 'collapsed' into effectively "\n".
+        let end_index = this_chunk
+            .rfind("\n")
+            .or_else(|| this_chunk.rfind(|c: char| c.is_whitespace()))
+            .unwrap_or(size_threshold);
+
+        let (this_piece, rest) = remaining_message.split_at(end_index);
+        result.push(this_piece.to_owned());
+        remaining_message = rest.trim_start();
+    }
+    result
+}
 
 fn duration_to_shorthand(dur: chrono::Duration) -> String {
     if dur < chrono::Duration::seconds(60) {
@@ -375,7 +434,14 @@ fn duration_to_shorthand(dur: chrono::Duration) -> String {
     return format!("{} weeks", dur.num_weeks());
 }
 
+fn is_duration_recentish(dur: chrono::Duration) -> bool {
+    dur < chrono::Duration::days(1)
+}
+
 type NamedBot<'a> = (&'a str, &'a Bot);
+
+#[derive(Debug, Default)]
+struct UIUpdater;
 
 impl UIUpdater {
     fn categorize_bots<'a>(
@@ -411,36 +477,77 @@ impl UIUpdater {
     fn draw_main_message_from_categories(
         &mut self,
         categories: &[(&str, Vec<(&str, &Bot)>)],
+        now: chrono::NaiveDateTime,
     ) -> String {
         assert!(!categories.is_empty());
 
-        let mut result = String::new();
+        let is_bot_red = |bot: &Bot| bot.status.first_failing_build.is_some();
 
-        let newest_update_time: chrono::NaiveDateTime = categories
+        let all_bots = categories
             .iter()
-            .map(|(_, bots)| {
-                bots.iter()
-                    .map(|(_, bot)| bot.status.most_recent_build.completion_time)
-                    .max()
-                    .unwrap()
-            })
-            .max()
-            .unwrap();
+            .flat_map(|(_, bot_vec)| bot_vec)
+            .map(|(_, bot)| bot);
+        let num_bots = all_bots.clone().count();
+        if num_bots == 0 {
+            return "No bots online.".to_owned();
+        }
 
+        let num_red_bots = all_bots.filter(|&bot| is_bot_red(bot)).count();
+        let mut result = String::new();
+        result += "**Bot summary**";
         write!(
             result,
-            "**Bot summary** (most recent build seen {} ago)",
-            duration_to_shorthand(chrono::Utc::now().naive_utc() - newest_update_time),
+            "\n{} of {} online bots are broken",
+            num_red_bots, num_bots
         )
         .unwrap();
+
+        if num_red_bots == 0 {
+            result += "! :eyes: :confetti_ball: :confetti_ball: :confetti_ball:";
+            return result;
+        }
+
+        result.push(':');
+        for (name, bots) in categories {
+            let red_bots = bots.iter().filter(|(_, bot)| is_bot_red(bot));
+            let num_red_bots = red_bots.clone().count();
+            if num_red_bots == 0 {
+                continue;
+            }
+
+            let num_recent_red_bots = red_bots
+                .filter(|x| {
+                    let broken_at =
+                        x.1.status
+                            .first_failing_build
+                            .as_ref()
+                            .unwrap()
+                            .completion_time;
+                    is_duration_recentish(now - broken_at)
+                })
+                .count();
+
+            write!(
+                result,
+                "\n- `{}`: {} of {} {} {} broken ({} recent)",
+                name,
+                num_red_bots,
+                bots.len(),
+                if bots.len() == 1 { "bot" } else { "bots" },
+                if num_red_bots == 1 { "is" } else { "are" },
+                num_recent_red_bots,
+            )
+            .unwrap();
+
+            if num_red_bots == bots.len() {
+                result += " :fire:";
+            }
+        }
 
         let all_green: Vec<_> = categories
             .iter()
             .filter_map(|(name, bots)| {
-                if bots
-                    .iter()
-                    .any(|x| x.1.status.first_failing_build.is_some())
-                {
+                if bots.iter().any(|(_, bot)| is_bot_red(bot)) {
                     None
                 } else {
                     Some(name)
@@ -463,41 +570,6 @@ impl UIUpdater {
             }
         }
 
-        if all_green.len() == categories.len() {
-            result += "\n\n...And no other online bots are broken! WOOHOO! :confetti_ball:";
-            return result;
-        }
-
-        let all_green: HashSet<_> = all_green.into_iter().collect();
-        for (name, bots) in categories {
-            if all_green.contains(name) {
-                continue;
-            }
-
-            let num_red_bots = bots
-                .iter()
-                .filter(|x| x.1.status.first_failing_build.is_some())
-                .count();
-
-            write!(
-                result,
-                "\n- {}: {} of {} {} broken",
-                name,
-                num_red_bots,
-                bots.len(),
-                if bots.len() == 1 {
-                    "bot is"
-                } else {
-                    "bots are"
-                },
-            )
-            .unwrap();
-
-            if num_red_bots == bots.len() {
-                result += " :fire:";
-            }
-        }
-
         result
     }
 
@@ -511,45 +583,42 @@ impl UIUpdater {
             };
         }
 
-        let mut messages = Vec::new();
-
-        messages.push({
-            let mut main_message = self.draw_main_message_from_categories(&categorized);
-            if num_offline > 0 {
-                write!(
-                    main_message,
-                    "\n\n({} {} omitted, since {} offline)",
-                    num_offline,
-                    if num_offline == 1 { "bot" } else { "bots" },
-                    if num_offline == 1 { "it's" } else { "they're" },
-                )
-                .unwrap()
-            }
-            main_message
-        });
-
         let start_time = chrono::Utc::now().naive_utc();
+        let mut full_message_text =
+            self.draw_main_message_from_categories(&categorized, start_time);
+
+        let mut push_section = |s: String| {
+            full_message_text += "\n\n";
+            full_message_text += &s;
+        };
+
         for (category_name, bots) in categorized {
+            let mut failed_bots: Vec<_> = bots
+                .iter()
+                .filter_map(|(name, bot)| match &bot.status.first_failing_build {
+                    None => None,
+                    Some(x) => Some((*name, x.completion_time)),
+                })
+                .collect();
+
+            if failed_bots.is_empty() {
+                continue;
+            }
+
+            failed_bots.sort_by_key(|&(_, first_failed_time)| first_failed_time);
+            failed_bots.reverse();
+
             let mut this_message = String::new();
-            for (bot_name, bot) in bots {
-                let first_failed = match &bot.status.first_failing_build {
-                    None => continue,
-                    Some(x) => x,
-                };
-
-                // Lazily write the header, since we filter out empty messages below.
-                if this_message.is_empty() {
-                    write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
-                }
-
-                let time_broken: String = if start_time < first_failed.completion_time {
+            write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
+            for (bot_name, first_failed_time) in failed_bots {
+                let time_broken: String = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
-                        first_failed, start_time
+                        bot_name, start_time
                     );
                     "?m".into()
                 } else {
-                    duration_to_shorthand(start_time - first_failed.completion_time)
+                    duration_to_shorthand(start_time - first_failed_time)
                 };
 
                 write!(
@@ -560,13 +629,42 @@ impl UIUpdater {
                 .unwrap();
             }
 
-            if !this_message.is_empty() {
-                messages.push(this_message);
-            }
+            push_section(this_message);
         }
 
+        push_section({
+            let mut final_section = String::new();
+
+            final_section += "**Meta**";
+            if num_offline > 0 {
+                write!(
+                    final_section,
+                    "{} {} omitted, since {} offline.",
+                    num_offline,
+                    if num_offline == 1 { "bot" } else { "bots" },
+                    if num_offline == 1 { "it's" } else { "they're" },
+                )
+                .unwrap()
+            }
+
+            let newest_update_time: chrono::NaiveDateTime = snapshot
+                .bots
+                .values()
+                .map(|bot| bot.status.most_recent_build.completion_time)
+                .max()
+                .unwrap();
+
+            write!(
+                final_section,
+                "\nLast build was seen {} ago.",
+                duration_to_shorthand(start_time - newest_update_time)
+            )
+            .unwrap();
+            final_section
+        });
+
         UI {
-            messages,
+            messages: split_message(full_message_text, DISCORD_MESSAGE_SIZE_LIMIT),
             force_ping_after_refresh: false,
         }
     }
@@ -612,4 +710,32 @@ pub(crate) fn run(
     let mut client = serenity::Client::new(token, handler)?;
     client.start()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    fn checked_split_message(message: &str, size: usize) -> Vec<String> {
+        let messages = super::split_message(message.to_owned(), size);
+        for m in &messages {
+            let n = m.chars().count();
+            assert!(
+                n <= size,
+                "{:?} has {} chars, which is above the size threshold of {}",
+                m,
+                n,
+                size
+            );
+        }
+        messages
+    }
+
+    #[test]
+    fn check_split_message_prefers_simple_boundaries() {
+        assert_eq!(checked_split_message("foo bar", 4), &["foo", "bar"]);
+        assert_eq!(checked_split_message("foo\nbar", 4), &["foo", "bar"]);
+        assert_eq!(checked_split_message("a\nb c", 2), &["a", "b", "c"]);
+        assert_eq!(checked_split_message("a\nb c", 4), &["a", "b c"]);
+        assert_eq!(checked_split_message("a b\nc", 4), &["a b", "c"]);
+        assert_eq!(checked_split_message("a\nb\nc", 4), &["a\nb", "c"]);
+    }
 }
