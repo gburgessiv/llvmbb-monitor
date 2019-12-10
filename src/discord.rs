@@ -4,7 +4,7 @@ use crate::BuilderState;
 use crate::FailureOr;
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -434,8 +434,9 @@ fn duration_to_shorthand(dur: chrono::Duration) -> String {
     return format!("{} weeks", dur.num_weeks());
 }
 
+// Eh.
 fn is_duration_recentish(dur: chrono::Duration) -> bool {
-    dur < chrono::Duration::days(1)
+    dur < chrono::Duration::hours(12)
 }
 
 type NamedBot<'a> = (&'a str, &'a Bot);
@@ -639,7 +640,7 @@ impl UIUpdater {
             if num_offline > 0 {
                 write!(
                     final_section,
-                    "{} {} omitted, since {} offline.",
+                    "\n- {} {} omitted, since {} offline.",
                     num_offline,
                     if num_offline == 1 { "bot" } else { "bots" },
                     if num_offline == 1 { "it's" } else { "they're" },
@@ -656,10 +657,11 @@ impl UIUpdater {
 
             write!(
                 final_section,
-                "\nLast build was seen {} ago.",
+                "\n- Last build was seen {} ago.",
                 duration_to_shorthand(start_time - newest_update_time)
             )
             .unwrap();
+
             final_section
         });
 
