@@ -452,7 +452,7 @@ async fn fetch_new_status_snapshot(
     let mut new_bots: HashMap<String, Bot> = HashMap::new();
     for (bot_name, status) in bot_statuses.into_iter() {
         // This _could_ be done in independent tasks, but we only do a lot of queries and such on
-        // startup, and even that only takes ~2-3s to go through.
+        // startup, and even that only takes ~20s to go through.
         let new_status = if let Some(last_bot) = prev.bots.get(&bot_name) {
             update_bot_status_with_cached_builds(client, &bot_name, &status, &last_bot.status)
                 .await?
@@ -542,9 +542,6 @@ fn main() -> FailureOr<()> {
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
-    if true {
-        tokio_rt.spawn(publish_forever(client, snapshots_tx));
-    }
-
+    tokio_rt.spawn(publish_forever(client, snapshots_tx));
     discord::run(&discord_token, snapshots_rx, tokio_rt.executor())
 }
