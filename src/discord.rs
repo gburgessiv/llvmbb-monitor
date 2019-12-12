@@ -4,7 +4,7 @@ use crate::BuilderState;
 use crate::FailureOr;
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -150,6 +150,7 @@ where
     }
 
     let mut current_ui;
+    let mut last_seen_force_ping = 0u64;
     {
         let setup_message = channel_id.send_message(http, |m| {
             m.content(":man_construction_worker: one moment -- set-up is in progress... :woman_construction_worker:")
@@ -212,9 +213,12 @@ where
             channel_id.delete_message(http, id)?;
         }
 
-        if current_ui.force_ping_after_refresh && !sent_message {
-            let ping_message = channel_id.send_message(http, |m| m.content("friendly ping"))?;
-            channel_id.delete_message(http, ping_message.id)?;
+        if current_ui.last_force_ping != last_seen_force_ping {
+            if !sent_message {
+                let ping_message = channel_id.send_message(http, |m| m.content("friendly ping"))?;
+                channel_id.delete_message(http, ping_message.id)?;
+            }
+            last_seen_force_ping = current_ui.last_force_ping;
         }
 
         if should_exit() {
@@ -372,12 +376,7 @@ impl serenity::client::EventHandler for MessageHandler {
 #[derive(Clone)]
 struct UI {
     messages: Vec<String>,
-    // FIXME: This is broken if a client drops a message. This should be more of a sticky bit for
-    // each client. Maybe integrating pubsub more deeply is gonna be necessary...
-    //
-    // Or, y'know, I can just make this a version counter like `Pubsub` and push the problem
-    // downstream. <Insert snark about running from my problems here>
-    force_ping_after_refresh: bool,
+    last_force_ping: u64,
 }
 
 // It's actually 2K chars, but I'd prefer premature splitting over off-by-a-littles
@@ -489,7 +488,10 @@ fn is_duration_recentish(dur: chrono::Duration) -> bool {
 type NamedBot<'a> = (&'a str, &'a Bot);
 
 #[derive(Debug, Default)]
-struct UIUpdater;
+struct UIUpdater {
+    force_ping_counter: u64,
+    last_broken_bots: HashSet<String>,
+}
 
 impl UIUpdater {
     fn categorize_bots<'a>(
@@ -627,7 +629,7 @@ impl UIUpdater {
         if categorized.is_empty() {
             return UI {
                 messages: vec![format!("All {} known bots appear offline", num_offline)],
-                force_ping_after_refresh: false,
+                last_force_ping: self.force_ping_counter,
             };
         }
 
@@ -640,6 +642,7 @@ impl UIUpdater {
             full_message_text += &s;
         };
 
+        let mut all_failed_bots: Vec<&str> = Vec::new();
         for (category_name, bots) in categorized {
             let mut failed_bots: Vec<_> = bots
                 .iter()
@@ -653,6 +656,7 @@ impl UIUpdater {
                 continue;
             }
 
+            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _)| bot_name));
             failed_bots.sort_by_key(|&(_, first_failed_time, _)| first_failed_time);
             failed_bots.reverse();
 
@@ -713,9 +717,18 @@ impl UIUpdater {
             final_section
         });
 
+        let has_new_failures = all_failed_bots.iter().any(|x| !self.last_broken_bots.contains(*x));
+        if has_new_failures {
+            self.force_ping_counter += 1;
+        }
+
+        if has_new_failures || all_failed_bots.len() != self.last_broken_bots.len() {
+            self.last_broken_bots = all_failed_bots.iter().map(|x| x.to_string()).collect();
+        }
+
         UI {
             messages: split_message(full_message_text, DISCORD_MESSAGE_SIZE_LIMIT),
-            force_ping_after_refresh: false,
+            last_force_ping: self.force_ping_counter,
         }
     }
 }
