@@ -164,10 +164,29 @@ where
         id: MessageId,
     }
 
+    let empty_message = "_ _";
+
+    // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
+    // writing a new message a while after we start. This is problematic, because it'll show up
+    // with the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll
+    // the screen for people who've already scrolled to the top, etc.
+    //
+    // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
+    let min_messages = 3usize;
     let mut existing_messages: Vec<UIMessage> = Vec::new();
     loop {
         let mut sent_message = false;
-        for (i, data) in current_ui.messages.iter().enumerate() {
+
+        let padding_messages = min_messages.saturating_sub(current_ui.messages.len());
+        let new_messages = current_ui
+            .messages
+            .iter()
+            .map(|x| x.as_str())
+            .chain(std::iter::repeat(empty_message).take(padding_messages));
+
+        let mut num_messages = 0;
+        for (i, data) in new_messages.enumerate() {
+            num_messages += 1;
             if let Some(prev_data) = existing_messages.get_mut(i) {
                 if *data == prev_data.last_value {
                     continue;
@@ -175,20 +194,20 @@ where
 
                 channel_id.edit_message(http, prev_data.id, |m| m.content(&*data))?;
 
-                prev_data.last_value = data.clone();
+                prev_data.last_value = data.to_owned();
                 continue;
             }
 
             let discord_message = channel_id.send_message(http, |m| m.content(&*data))?;
             sent_message = true;
             existing_messages.push(UIMessage {
-                last_value: data.clone(),
+                last_value: data.to_owned(),
                 id: discord_message.id,
             });
         }
 
-        debug_assert!(current_ui.messages.len() <= existing_messages.len());
-        for _ in current_ui.messages.len()..existing_messages.len() {
+        debug_assert!(num_messages <= existing_messages.len());
+        for _ in num_messages..existing_messages.len() {
             let id = existing_messages.pop().unwrap().id;
             channel_id.delete_message(http, id)?;
         }
@@ -355,6 +374,9 @@ struct UI {
     messages: Vec<String>,
     // FIXME: This is broken if a client drops a message. This should be more of a sticky bit for
     // each client. Maybe integrating pubsub more deeply is gonna be necessary...
+    //
+    // Or, y'know, I can just make this a version counter like `Pubsub` and push the problem
+    // downstream. <Insert snark about running from my problems here>
     force_ping_after_refresh: bool,
 }
 
@@ -453,7 +475,8 @@ fn duration_to_shorthand(dur: chrono::Duration) -> String {
         return format!("{} {}", h, if h == 1 { "hour" } else { "hours" });
     }
     if dur < chrono::Duration::days(28) {
-        return format!("{} days", dur.num_days());
+        let d = dur.num_days();
+        return format!("{} {}", d, if d == 1 { "day" } else { "days" });
     }
     return format!("{} weeks", dur.num_weeks());
 }
