@@ -43,7 +43,7 @@ class Runner:
                     self._proc = None
 
                 log_file = os.path.join(self._logs_dir,
-                                        f'{int(time.time())}.log')
+                                        str(int(time.time())) + '.log')
                 logging.info('Spawning monitor (logs available at %s)',
                              log_file)
                 with open(log_file, 'w') as f:
@@ -99,8 +99,8 @@ def try_fetch_and_rebuild(git_dir, last_head):
     origin_master_sha = subprocess.check_output(
         ['git', 'rev-parse', 'origin/master'],
         cwd=git_dir,
-        encoding='utf-8',
     ).strip()
+    origin_master_sha = origin_master_sha.decode('utf-8')
 
     if last_head == origin_master_sha:
         return last_head, None
