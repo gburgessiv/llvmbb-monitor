@@ -283,7 +283,7 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         }
 
-        let my_channel_name = "llvmbb";
+        let my_channel_name = "buildbot-status";
         let my_channel_id: ChannelId = match guild
             .channels
             .iter()
