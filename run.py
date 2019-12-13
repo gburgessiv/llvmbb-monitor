@@ -12,7 +12,8 @@ import time
 
 
 class Runner:
-    def __init__(self, exe_loc, logs_dir):
+    def __init__(self, exe_loc, logs_dir, discord_token):
+        self._discord_token = discord_token
         self._logs_dir = logs_dir
         self._exe_loc = exe_loc
         self._proc = None
@@ -46,10 +47,15 @@ class Runner:
                 logging.info('Spawning monitor (logs available at %s)',
                              log_file)
                 with open(log_file, 'w') as f:
-                    self._proc = subprocess.Popen([self._exe_loc],
-                                                  stdin=subprocess.DEVNULL,
-                                                  stdout=f,
-                                                  stderr=f)
+                    self._proc = subprocess.Popen(
+                        [
+                            self._exe_loc,
+                            '--discord_token=' + self._discord_token,
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=f,
+                        stderr=f,
+                    )
 
     def push_new_binary(self, binary_loc):
         with self._lock:
@@ -137,6 +143,10 @@ def main():
 
     my_dir = os.path.join(os.getenv('HOME'), 'llvmbb_monitor')
 
+    discord_token = os.getenv('DISCORD_TOKEN')
+    if not discord_token:
+      sys.exit('Set DISCORD_TOKEN=something')
+
     exe_loc = os.path.join(my_dir, 'run_bot')
     git_repo_dir = os.path.join(my_dir, 'git')
     logs_dir = os.path.join(my_dir, 'logs')
@@ -152,7 +162,7 @@ def main():
             git_repo_dir,
         ])
 
-    runner = Runner(exe_loc, logs_dir)
+    runner = Runner(exe_loc, logs_dir, discord_token)
     runner_thread = threading.Thread(target=runner.run_forever)
     runner_thread.daemon = True
     runner_thread.start()
