@@ -17,6 +17,11 @@ use serenity::prelude::*;
 use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
+// FIXME: Either UI or Pubsub is going to need to become an unbounded channel for some kinds of
+// events, since we're going to want to funnel "bot broken" events into a channel. Otherwise, if
+// Discord 500s, we could drop an update while 'restarting'.
+//
+// Dropping updates while the server is unavailable is probably not as bad.
 struct PubsubData<T> {
     data: Option<T>,
     version: u64,
@@ -731,7 +736,9 @@ impl UIUpdater {
         let has_new_failures = all_failed_bots
             .iter()
             .any(|x| !self.last_broken_bots.contains(*x));
-        if has_new_failures {
+        // FIXME: Disabled, since I'm not sure this was a great idea. Going to try a dedicated
+        // 'streaming' channel instead.
+        if false && has_new_failures {
             self.force_ping_counter += 1;
         }
 
