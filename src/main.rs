@@ -524,7 +524,10 @@ async fn publish_forever(
                         .count(),
                 );
 
-                if notifications.broadcast(Some(last_snapshot.clone())).is_err() {
+                if notifications
+                    .broadcast(Some(last_snapshot.clone()))
+                    .is_err()
+                {
                     warn!("All lab handles are closed; shutting down publishing loop");
                 }
             }
@@ -537,11 +540,25 @@ async fn publish_forever(
 
 fn main() -> FailureOr<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
-    let discord_token = std::fs::read_to_string("./token")?;
+    let matches = clap::App::new("llvm_buildbot_monitor")
+        .arg(
+            clap::Arg::with_name("discord_token")
+                .long("discord_token")
+                .takes_value(true)
+                .required(true),
+        )
+        .get_matches();
+
+    let discord_token = matches.value_of("discord_token").unwrap();
     let client = LLVMLabClient::new("http://lab.llvm.org:8011")?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
     tokio_rt.spawn(publish_forever(client, snapshots_tx));
-    discord::run(&discord_token, snapshots_rx, tokio_rt.executor())
+    discord::run(
+        &discord_token,
+        git_version::git_version!(),
+        snapshots_rx,
+        tokio_rt.executor(),
+    )
 }

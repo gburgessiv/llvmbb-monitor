@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{error, info, warn};
+use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::http::raw::Http;
 use serenity::model::prelude::*;
 use serenity::prelude::*;
@@ -234,6 +235,7 @@ struct MessageHandler {
     // The readonly distribution here makes an RwMutex more appropriate in theory, but there're
     // going to be two threads polling this ~minutely. So let's prefer simpler code.
     servers: Arc<Mutex<GuildServerState>>,
+    bot_version: &'static str,
 }
 
 impl MessageHandler {
@@ -368,6 +370,15 @@ impl serenity::client::EventHandler for MessageHandler {
     fn guild_unavailable(&self, _ctx: Context, guild_id: GuildId) {
         warn!("Guild #{} is now unavailable", guild_id);
         self.decref_guild_server(guild_id);
+    }
+
+    fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
+        if event.new == serenity::gateway::ConnectionStage::Connected {
+            info!("New shard connection established");
+            // FIXME: Until Serenity supports arbitrary status setting, "Playing ${sha}" sounds
+            // like my best bet...
+            ctx.set_activity(Activity::playing(self.bot_version));
+        }
     }
 }
 
@@ -717,7 +728,9 @@ impl UIUpdater {
             final_section
         });
 
-        let has_new_failures = all_failed_bots.iter().any(|x| !self.last_broken_bots.contains(*x));
+        let has_new_failures = all_failed_bots
+            .iter()
+            .any(|x| !self.last_broken_bots.contains(*x));
         if has_new_failures {
             self.force_ping_counter += 1;
         }
@@ -761,6 +774,7 @@ async fn draw_ui(
 
 pub(crate) fn run(
     token: &str,
+    bot_version: &'static str,
     snapshots: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
     executor: TaskExecutor,
 ) -> FailureOr<()> {
@@ -769,6 +783,7 @@ pub(crate) fn run(
     let handler = MessageHandler {
         pubsub: pubsub,
         servers: Default::default(),
+        bot_version,
     };
     let mut client = serenity::Client::new(token, handler)?;
     client.start()?;
