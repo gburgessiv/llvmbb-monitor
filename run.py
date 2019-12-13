@@ -36,9 +36,7 @@ class Runner:
 
                 initial_binary_version = self._binary_version
                 if self._proc:
-                    try:
-                        self._proc.wait(timeout=0)
-                    except TimeoutError:
+                    if self._proc.poll() is None:
                         self._proc.kill()
                         self._proc.wait()
                     self._proc = None
