@@ -1,12 +1,13 @@
 use crate::Bot;
 use crate::BotStatusSnapshot;
 use crate::BuilderState;
+use crate::CompletedBuild;
 use crate::FailureOr;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use log::{error, info, warn};
@@ -17,78 +18,169 @@ use serenity::prelude::*;
 use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
-// FIXME: Either UI or Pubsub is going to need to become an unbounded channel for some kinds of
-// events, since we're going to want to funnel "bot broken" events into a channel. Otherwise, if
-// Discord 500s, we could drop an update while 'restarting'.
-//
-// Dropping updates while the server is unavailable is probably not as bad.
-struct PubsubData<T> {
-    data: Option<T>,
-    version: u64,
+// A bit awkward to hold on purpose, so this isn't Clone/Copy/etc and unregistered multiple times
+// Auto-unregistering might be nice, but would require an Arc<InfiniteVec<_>>, or other lifetime
+// requirements on the InfiniteVec, and I'm not sure how annoying that'd be to deal with.
+#[derive(Debug, Hash, Eq, PartialEq)]
+struct InfiniteVecToken {
+    value: usize,
 }
 
-struct Pubsub<T>
+#[derive(Debug)]
+struct InfiniteVec<T>
 where
     T: Clone,
 {
-    data: Mutex<PubsubData<T>>,
-    cond: std::sync::Condvar,
+    values: Vec<T>,
+    base_offset: usize,
+    offsets: HashMap<InfiniteVecToken, usize>,
+    next_token_value: usize,
 }
 
-impl<T> Pubsub<T>
+impl<T> Default for InfiniteVec<T>
 where
     T: Clone,
 {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            data: Mutex::new(PubsubData {
-                data: None,
-                version: 0,
-            }),
-            cond: Default::default(),
-        })
-    }
-
-    fn publish(&self, value: T) {
-        let mut data = self.data.lock().unwrap();
-        data.data = Some(value);
-        data.version += 1;
-        self.cond.notify_all();
-    }
-
-    fn reader(me: &Arc<Self>) -> PubsubReader<T> {
-        PubsubReader {
-            pubsub: me.clone(),
-            version: 0,
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            base_offset: 0,
+            offsets: HashMap::new(),
+            next_token_value: 0,
         }
     }
 }
 
-struct PubsubReader<T>
+impl<T> InfiniteVec<T>
 where
     T: Clone,
 {
-    pubsub: Arc<Pubsub<T>>,
-    version: u64,
-}
-
-impl<T> PubsubReader<T>
-where
-    T: Clone,
-{
-    fn next(&mut self) -> T {
-        let mut data = self.pubsub.data.lock().unwrap();
-        while data.version == self.version {
-            data = self.pubsub.cond.wait(data).unwrap();
-        }
-        self.version = data.version;
-        data.data.as_ref().unwrap().clone()
+    fn push(&mut self, elem: T) {
+        self.values.push(elem);
     }
 
-    /// Allows us to reread the current value on our next next() call, if a value has been supplied
-    /// to this Pubsub already.
-    fn reset(&mut self) {
-        self.version = 0;
+    fn compact(&mut self) {
+        if self.values.is_empty() {
+            return;
+        }
+
+        let min_offset = match self.offsets.values().min() {
+            None => {
+                self.values.clear();
+                return;
+            }
+            Some(x) => x,
+        };
+
+        let min_index = min_offset - self.base_offset;
+        if min_index == 0 {
+            return;
+        }
+
+        let mut i = 0usize;
+        self.values.retain(|_| {
+            let keep = i >= min_index;
+            i += 1;
+            keep
+        });
+        self.base_offset += min_index;
+    }
+
+    fn get_all(&mut self, token: &InfiniteVecToken) -> Vec<T> {
+        let end_index = self.values.len() + self.base_offset;
+        let start_offset = std::mem::replace(
+            self.offsets.get_mut(token).expect("Unknown token"),
+            end_index,
+        );
+        let start_index = start_offset - self.base_offset;
+        self.values[start_index..].iter().cloned().collect()
+    }
+
+    fn register(&mut self) -> InfiniteVecToken {
+        let value = self.next_token_value;
+        self.next_token_value += 1;
+        self.offsets.insert(
+            InfiniteVecToken { value },
+            self.values.len() + self.base_offset,
+        );
+        InfiniteVecToken { value }
+    }
+
+    fn unregister(&mut self, tok: &InfiniteVecToken) {
+        self.offsets
+            .remove(tok)
+            .expect("Removing non-existing token");
+    }
+}
+
+#[derive(Default)]
+struct UIBroadcasterState {
+    version: usize,
+    last_ui: Option<Arc<UI>>,
+    failed_bots: InfiniteVec<String>,
+}
+
+#[derive(Default)]
+struct UIBroadcaster {
+    state: Mutex<UIBroadcasterState>,
+    updates: Condvar,
+}
+
+impl UIBroadcaster {
+    fn publish(&self, next_ui: Arc<UI>, new_failed_builds: &[String]) {
+        let mut state = self.state.lock().unwrap();
+        state.version += 1;
+        state.last_ui = Some(next_ui);
+        state.failed_bots.compact();
+        for f in new_failed_builds {
+            state.failed_bots.push(f.clone());
+        }
+        self.updates.notify_all();
+    }
+
+    fn receiver(me: &Arc<Self>) -> UIBroadcastReceiver {
+        let token = me.state.lock().unwrap().failed_bots.register();
+        UIBroadcastReceiver {
+            broadcaster: me.clone(),
+            last_version: 0,
+            token: token,
+        }
+    }
+}
+
+struct UIBroadcastReceiver {
+    broadcaster: Arc<UIBroadcaster>,
+    last_version: usize,
+    token: InfiniteVecToken,
+}
+
+impl UIBroadcastReceiver {
+    fn next(&mut self) -> (Arc<UI>, Vec<String>) {
+        let mut state = self.broadcaster.state.lock().unwrap();
+        while state.version == self.last_version {
+            state = self.broadcaster.updates.wait(state).unwrap();
+        }
+        self.last_version = state.version;
+
+        let ui = state
+            .last_ui
+            .as_ref()
+            .expect("UI should always have a value after version==0")
+            .clone();
+
+        let new_failed_builds = state.failed_bots.get_all(&self.token);
+        (ui, new_failed_builds)
+    }
+}
+
+impl Drop for UIBroadcastReceiver {
+    fn drop(&mut self) {
+        self.broadcaster
+            .state
+            .lock()
+            .unwrap()
+            .failed_bots
+            .unregister(&self.token)
     }
 }
 
@@ -131,58 +223,42 @@ struct GuildServerState {
     orphan_refcounts: HashMap<GuildId, usize>,
 }
 
-fn serve_channel<F>(
-    http: &Http,
-    channel_id: ChannelId,
-    ui: &mut PubsubReader<Arc<UI>>,
-    should_exit: &mut F,
-) -> FailureOr<()>
-where
-    F: FnMut() -> bool,
-{
-    // First, delete all of the messages in the channel.
-    info!("Removing existing messages in {}", channel_id);
-    loop {
-        let messages = channel_id.messages(http, |retriever| {
-            // 100 is a discord limitation, sadly
-            retriever.after(MessageId(0)).limit(100)
-        })?;
+struct ChannelServer {
+    status_channel: ChannelId,
+    updates_channel: ChannelId,
 
-        if messages.is_empty() {
-            break;
-        }
+    ui: Option<Arc<UI>>,
+    unsent_breakages: Vec<String>,
+}
 
-        channel_id.delete_messages(http, messages.iter().map(|x| x.id))?;
+struct ServerUIMessage {
+    last_value: String,
+    id: MessageId,
+}
+
+impl ChannelServer {
+    fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
+        let (ui, new_breakages) = receiver.next();
+        self.ui = Some(ui.clone());
+        self.unsent_breakages.extend(new_breakages.into_iter());
+        ui
     }
 
-    let mut current_ui;
-    let mut last_seen_force_ping = 0u64;
-    {
-        let setup_message = channel_id.send_message(http, |m| {
-            m.content(":man_construction_worker: one moment -- set-up is in progress... :woman_construction_worker:")
-        })?;
+    fn update_status_channel(
+        &self,
+        http: &Http,
+        current_ui: &UI,
+        existing_messages: &mut Vec<ServerUIMessage>,
+    ) -> FailureOr<()> {
+        let empty_message = "_ _";
 
-        current_ui = ui.next();
-        channel_id.delete_message(http, setup_message.id)?;
-    }
-
-    struct UIMessage {
-        last_value: String,
-        id: MessageId,
-    }
-
-    let empty_message = "_ _";
-
-    // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
-    // writing a new message a while after we start. This is problematic, because it'll show up
-    // with the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll
-    // the screen for people who've already scrolled to the top, etc.
-    //
-    // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
-    let min_messages = 3usize;
-    let mut existing_messages: Vec<UIMessage> = Vec::new();
-    loop {
-        let mut sent_message = false;
+        // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
+        // writing a new message a while after we start. This is problematic, because it'll show up
+        // with the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll
+        // the screen for people who've already scrolled to the top, etc.
+        //
+        // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
+        let min_messages = 3usize;
 
         let padding_messages = min_messages.saturating_sub(current_ui.messages.len());
         let new_messages = current_ui
@@ -199,15 +275,17 @@ where
                     continue;
                 }
 
-                channel_id.edit_message(http, prev_data.id, |m| m.content(&*data))?;
+                self.status_channel
+                    .edit_message(http, prev_data.id, |m| m.content(&*data))?;
 
                 prev_data.last_value = data.to_owned();
                 continue;
             }
 
-            let discord_message = channel_id.send_message(http, |m| m.content(&*data))?;
-            sent_message = true;
-            existing_messages.push(UIMessage {
+            let discord_message = self
+                .status_channel
+                .send_message(http, |m| m.content(&*data))?;
+            existing_messages.push(ServerUIMessage {
                 last_value: data.to_owned(),
                 id: discord_message.id,
             });
@@ -216,27 +294,103 @@ where
         debug_assert!(num_messages <= existing_messages.len());
         for _ in num_messages..existing_messages.len() {
             let id = existing_messages.pop().unwrap().id;
-            channel_id.delete_message(http, id)?;
+            self.status_channel.delete_message(http, id)?;
         }
+        Ok(())
+    }
 
-        if current_ui.last_force_ping != last_seen_force_ping {
-            if !sent_message {
-                let ping_message = channel_id.send_message(http, |m| m.content("friendly ping"))?;
-                channel_id.delete_message(http, ping_message.id)?;
+    fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
+        while !self.unsent_breakages.is_empty() {
+            let mut current_message = String::new();
+
+            let mut num_messages_consumed = 0usize;
+            for breakage in &self.unsent_breakages {
+                assert!(current_message.len() <= DISCORD_MESSAGE_SIZE_LIMIT);
+                if current_message.is_empty() {
+                    current_message += breakage;
+                    num_messages_consumed += 1;
+                    continue;
+                }
+
+                let added_len = 1 + current_message.len();
+                if current_message.len() + added_len >= DISCORD_MESSAGE_SIZE_LIMIT {
+                    break;
+                }
+
+                current_message.push('\n');
+                current_message += breakage;
+                num_messages_consumed += 1;
             }
-            last_seen_force_ping = current_ui.last_force_ping;
+
+            self.updates_channel
+                .send_message(http, |m| m.content(&current_message))?;
+
+            let mut i = 0usize;
+            self.unsent_breakages.retain(|_| {
+                let keep = i >= num_messages_consumed;
+                i += 1;
+                keep
+            });
+        }
+        Ok(())
+    }
+
+    fn serve<F>(
+        &mut self,
+        http: &Http,
+        ui: &mut UIBroadcastReceiver,
+        should_exit: &mut F,
+    ) -> FailureOr<()>
+    where
+        F: FnMut() -> bool,
+    {
+        info!("Removing existing messages in {}", self.status_channel);
+        loop {
+            let messages = self.status_channel.messages(http, |retriever| {
+                // 100 is a discord limitation, sadly
+                retriever.after(MessageId(0)).limit(100)
+            })?;
+
+            if messages.is_empty() {
+                break;
+            }
+
+            self.status_channel
+                .delete_messages(http, messages.iter().map(|x| x.id))?;
         }
 
-        if should_exit() {
-            return Ok(());
-        }
+        let mut current_ui: Arc<UI> = match self.ui.as_ref() {
+            None => {
+                let setup_message = self.status_channel.send_message(http, |m| {
+                    m.content(concat!(
+                        ":man_construction_worker: one moment -- set-up is in ",
+                        "progress... :woman_construction_worker:"
+                    ))
+                })?;
 
-        current_ui = ui.next();
+                let result = self.await_next_ui(ui);
+                self.status_channel.delete_message(http, setup_message.id)?;
+                result
+            }
+            Some(x) => x.clone(),
+        };
+
+        let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
+        loop {
+            self.update_status_channel(http, &*current_ui, &mut existing_messages)?;
+            self.update_updates_channel(http)?;
+
+            if should_exit() {
+                return Ok(());
+            }
+
+            current_ui = self.await_next_ui(ui);
+        }
     }
 }
 
 struct MessageHandler {
-    pubsub: Arc<Pubsub<Arc<UI>>>,
+    ui_broadcaster: Arc<UIBroadcaster>,
     // The readonly distribution here makes an RwMutex more appropriate in theory, but there're
     // going to be two threads polling this ~minutely. So let's prefer simpler code.
     servers: Arc<Mutex<GuildServerState>>,
@@ -283,26 +437,35 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         }
 
-        let my_channel_name = "buildbot-status";
-        let my_channel_id: ChannelId = match guild
+        let find_channel_id = |name: &str| match guild
             .channels
             .iter()
-            .filter(|x| x.1.read().name == my_channel_name)
+            .filter(|x| x.1.read().name == name)
             .map(|x| x.0)
             .next()
         {
             Some(x) => {
                 info!("Identified #{} as my channel in #{}", x, guild_id);
-                *x
+                Some(*x)
             }
             None => {
-                error!("No {} channel in #{}; quit", my_channel_name, guild_id);
-                return;
+                error!("No {} channel in #{}; quit", name, guild_id);
+                None
             }
         };
 
+        let status_channel = match find_channel_id("buildbot-status") {
+            Some(x) => x,
+            None => return,
+        };
+
+        let updates_channel = match find_channel_id("buildbot-updates") {
+            Some(x) => x,
+            None => return,
+        };
+
         let http = ctx.http;
-        let mut pubsub_reader = Pubsub::reader(&self.pubsub);
+        let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
         std::thread::spawn(move || {
             let mut responded_with_yes = false;
@@ -334,11 +497,16 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
             };
 
+            let mut server = ChannelServer {
+                status_channel,
+                updates_channel,
+
+                ui: None,
+                unsent_breakages: Vec::new(),
+            };
             loop {
                 info!("Setting up serving for guild #{}", guild_id);
-                if let Err(x) =
-                    serve_channel(&*http, my_channel_id, &mut pubsub_reader, &mut should_exit)
-                {
+                if let Err(x) = server.serve(&*http, &mut pubsub_reader, &mut should_exit) {
                     error!("Failed serving guild #{}: {}", guild_id, x);
                 }
 
@@ -354,8 +522,6 @@ impl serenity::client::EventHandler for MessageHandler {
                 if should_exit() {
                     break;
                 }
-
-                pubsub_reader.reset();
             }
 
             info!("Shut down serving for #{}", guild_id);
@@ -389,10 +555,9 @@ impl serenity::client::EventHandler for MessageHandler {
 
 /// The UI is basically what should be sent at any given time. Once a UI is published, it's
 /// immutable.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct UI {
     messages: Vec<String>,
-    last_force_ping: u64,
 }
 
 // It's actually 2K chars, but I'd prefer premature splitting over off-by-a-littles
@@ -504,12 +669,9 @@ fn is_duration_recentish(dur: chrono::Duration) -> bool {
 type NamedBot<'a> = (&'a str, &'a Bot);
 
 #[derive(Debug, Default)]
-struct UIUpdater {
-    force_ping_counter: u64,
-    last_broken_bots: HashSet<String>,
-}
+struct StatusUIUpdater;
 
-impl UIUpdater {
+impl StatusUIUpdater {
     fn categorize_bots<'a>(
         snapshot: &'a BotStatusSnapshot,
     ) -> (Vec<(&'a str, Vec<NamedBot<'a>>)>, usize) {
@@ -645,7 +807,6 @@ impl UIUpdater {
         if categorized.is_empty() {
             return UI {
                 messages: vec![format!("All {} known bots appear offline", num_offline)],
-                last_force_ping: self.force_ping_counter,
             };
         }
 
@@ -733,32 +894,72 @@ impl UIUpdater {
             final_section
         });
 
-        let has_new_failures = all_failed_bots
-            .iter()
-            .any(|x| !self.last_broken_bots.contains(*x));
-        // FIXME: Disabled, since I'm not sure this was a great idea. Going to try a dedicated
-        // 'streaming' channel instead.
-        if false && has_new_failures {
-            self.force_ping_counter += 1;
-        }
-
-        if has_new_failures || all_failed_bots.len() != self.last_broken_bots.len() {
-            self.last_broken_bots = all_failed_bots.iter().map(|x| x.to_string()).collect();
-        }
-
         UI {
             messages: split_message(full_message_text, DISCORD_MESSAGE_SIZE_LIMIT),
-            last_force_ping: self.force_ping_counter,
         }
     }
 }
 
+#[derive(Default, Debug)]
+struct UpdateUIUpdater {
+    previously_broken_bots: Option<HashSet<String>>,
+}
+
+impl UpdateUIUpdater {
+    fn get_updates(&mut self, snapshot: &BotStatusSnapshot) -> Vec<String> {
+        let now_broken: Vec<(&String, &CompletedBuild)> = snapshot
+            .bots
+            .iter()
+            .filter_map(|(name, bot)| {
+                if let Some(x) = &bot.status.first_failing_build {
+                    Some((name, x))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut messages = Vec::new();
+        let need_update;
+        if let Some(prev_broken) = &self.previously_broken_bots {
+            for (name, build) in now_broken
+                .iter()
+                .filter(|(name, _)| !prev_broken.contains(*name))
+            {
+                messages.push(format!(
+                    "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
+                    name, build.id
+                ));
+            }
+            need_update = messages.len() != 0 || prev_broken.len() != now_broken.len();
+        } else {
+            // Produce no messages to start with, since this channel is only meant to be pinged
+            // with new breakages.
+            need_update = true;
+        };
+
+        if need_update {
+            self.previously_broken_bots = Some(
+                now_broken
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect(),
+            );
+        }
+
+        messages
+    }
+}
+
+// FIXME: Calling is 'the UI' is now kinda outdated, since we have two of them. Maybe rename.
 async fn draw_ui(
     mut events: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
-    pubsub: Arc<Pubsub<Arc<UI>>>,
+    pubsub: Arc<UIBroadcaster>,
 ) {
     let mut looped_before = false;
-    let mut updater = UIUpdater::default();
+    let mut status_ui = StatusUIUpdater::default();
+    let mut update_ui = UpdateUIUpdater::default();
+
     loop {
         let snapshot = match events.recv().await {
             Some(Some(x)) => x,
@@ -775,7 +976,10 @@ async fn draw_ui(
         };
 
         looped_before = true;
-        pubsub.publish(Arc::new(updater.draw_ui_with_snapshot(&*snapshot)));
+        pubsub.publish(
+            Arc::new(status_ui.draw_ui_with_snapshot(&*snapshot)),
+            &update_ui.get_updates(&*snapshot),
+        );
     }
 }
 
@@ -785,10 +989,10 @@ pub(crate) fn run(
     snapshots: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
     executor: TaskExecutor,
 ) -> FailureOr<()> {
-    let pubsub = Pubsub::new();
-    executor.spawn(draw_ui(snapshots, pubsub.clone()));
+    let ui_broadcaster = Arc::new(UIBroadcaster::default());
+    executor.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
     let handler = MessageHandler {
-        pubsub: pubsub,
+        ui_broadcaster,
         servers: Default::default(),
         bot_version,
     };
@@ -799,8 +1003,10 @@ pub(crate) fn run(
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     fn checked_split_message(message: &str, size: usize) -> Vec<String> {
-        let messages = super::split_message(message.to_owned(), size);
+        let messages = split_message(message.to_owned(), size);
         for m in &messages {
             let n = m.chars().count();
             assert!(
@@ -815,7 +1021,7 @@ mod test {
     }
 
     #[test]
-    fn check_split_message_prefers_simple_boundaries() {
+    fn test_split_message_prefers_simple_boundaries() {
         assert_eq!(checked_split_message("foo bar", 4), &["foo", "bar"]);
         assert_eq!(checked_split_message("foo\nbar", 4), &["foo", "bar"]);
         assert_eq!(checked_split_message("a\nb c", 2), &["a", "b", "c"]);
@@ -825,5 +1031,50 @@ mod test {
 
         assert_eq!(checked_split_message("a\n\nb\ncd", 6), &["a\n\nb", "cd"]);
         assert_eq!(checked_split_message("a\nb\n\ncd", 6), &["a", "b\n\ncd"]);
+    }
+
+    #[test]
+    fn test_infinite_vec_appears_to_work() {
+        let mut vec = InfiniteVec::<i32>::default();
+        let token_a = vec.register();
+        assert!(vec.get_all(&token_a).is_empty());
+
+        vec.push(1);
+        assert_eq!(vec.get_all(&token_a), &[1]);
+        assert!(vec.get_all(&token_a).is_empty());
+
+        let token_b = vec.register();
+        assert!(vec.get_all(&token_a).is_empty());
+
+        vec.push(2);
+        assert_eq!(vec.get_all(&token_a), &[2]);
+        assert_eq!(vec.get_all(&token_b), &[2]);
+
+        vec.push(3);
+        let token_c = vec.register();
+
+        vec.push(4);
+        assert_eq!(vec.get_all(&token_a), &[3, 4]);
+        vec.compact();
+
+        assert_eq!(vec.get_all(&token_b), &[3, 4]);
+        assert_eq!(vec.get_all(&token_c), &[4]);
+        vec.compact();
+
+        assert!(vec.values.is_empty());
+    }
+
+    #[test]
+    fn test_infinite_vec_compacts_properly_with_no_registration() {
+        let mut vec = InfiniteVec::<i32>::default();
+        vec.push(1);
+        vec.compact();
+        assert!(vec.values.is_empty());
+
+        let token = vec.register();
+        vec.push(2);
+        vec.unregister(&token);
+        vec.compact();
+        assert!(vec.values.is_empty());
     }
 }
