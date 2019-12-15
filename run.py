@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Syncs, builds, and runs the bot."""
 
-import logging
+import datetime
 import itertools
+import logging
 import os
 import shutil
 import subprocess
@@ -42,8 +43,10 @@ class Runner:
                         self._proc.wait()
                     self._proc = None
 
-                log_file = os.path.join(self._logs_dir,
-                                        str(int(time.time())) + '.log')
+                log_file = os.path.join(
+                    self._logs_dir,
+                    datetime.datetime.now().strftime('%FT%T') + '.log',
+                )
                 logging.info('Spawning monitor (logs available at %s)',
                              log_file)
                 with open(log_file, 'w') as f:
@@ -145,7 +148,7 @@ def main():
 
     discord_token = os.getenv('DISCORD_TOKEN')
     if not discord_token:
-      sys.exit('Set DISCORD_TOKEN=something')
+        sys.exit('Set DISCORD_TOKEN=something')
 
     exe_loc = os.path.join(my_dir, 'run_bot')
     git_repo_dir = os.path.join(my_dir, 'git')
