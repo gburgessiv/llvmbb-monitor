@@ -825,7 +825,7 @@ impl StatusUIUpdater {
                 .iter()
                 .filter_map(|(name, bot)| match &bot.status.first_failing_build {
                     None => None,
-                    Some(x) => Some((*name, x.completion_time, x.id)),
+                    Some(x) => Some((*name, x.completion_time)),
                 })
                 .collect();
 
@@ -833,14 +833,14 @@ impl StatusUIUpdater {
                 continue;
             }
 
-            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _)| bot_name));
-            failed_bots.sort_by_key(|&(_, first_failed_time, _)| first_failed_time);
+            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _)| bot_name));
+            failed_bots.sort_by_key(|&(_, first_failed_time)| first_failed_time);
             failed_bots.reverse();
 
             let mut this_message = String::new();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
             // FIXME: Is funnelling first_failed_id in somehow good?
-            for (bot_name, first_failed_time, _first_failed_id) in failed_bots {
+            for (bot_name, first_failed_time) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
