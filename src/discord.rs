@@ -841,20 +841,29 @@ impl StatusUIUpdater {
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
             // FIXME: Is funnelling first_failed_id in somehow good?
             for (bot_name, first_failed_time, _first_failed_id) in failed_bots {
-                let time_broken: String = if start_time < first_failed_time {
+                let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
                         bot_name, start_time
                     );
-                    "?m".into()
+                    (chrono::Duration::microseconds(0), "?m".into())
                 } else {
-                    duration_to_shorthand(start_time - first_failed_time)
+                    let time_broken = start_time - first_failed_time;
+                    (time_broken, duration_to_shorthand(time_broken))
+                };
+
+                let emoji: &'static str = if time_broken < chrono::Duration::hours(1) {
+                    " :boom:"
+                } else if time_broken < chrono::Duration::hours(6) {
+                    " :umbrella:"
+                } else {
+                    ""
                 };
 
                 write!(
                     this_message,
-                    "\n- For {}: http://lab.llvm.org:8011/builders/{}",
-                    time_broken, bot_name
+                    "\n-{} For {}: http://lab.llvm.org:8011/builders/{}",
+                    emoji, time_broken_str, bot_name
                 )
                 .unwrap();
             }
