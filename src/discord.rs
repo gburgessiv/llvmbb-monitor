@@ -851,7 +851,7 @@ impl StatusUIUpdater {
                     (time_broken, duration_to_shorthand(time_broken))
                 };
 
-                let emoji: &'static str = if time_broken < chrono::Duration::hours(1) {
+                let emoji: &str = if time_broken < chrono::Duration::hours(1) {
                     " :boom:"
                 } else if time_broken < chrono::Duration::hours(6) {
                     " :umbrella:"
@@ -1004,8 +1004,7 @@ pub(crate) fn run(
         servers: Default::default(),
         bot_version,
     };
-    let mut client = serenity::Client::new(token, handler)?;
-    client.start()?;
+    serenity::Client::new(token, handler)?.start()?;
     Ok(())
 }
 
