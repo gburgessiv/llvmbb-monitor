@@ -839,7 +839,6 @@ impl StatusUIUpdater {
 
             let mut this_message = String::new();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
-            // FIXME: Is funnelling first_failed_id in somehow good?
             for (bot_name, first_failed_time) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
