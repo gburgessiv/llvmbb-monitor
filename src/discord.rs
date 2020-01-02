@@ -259,8 +259,8 @@ impl ChannelServer {
 
         // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
         // writing a new message a while after we start. This is problematic, because it'll show up
-        // with the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll
-        // the screen for people who've already scrolled to the top, etc.
+        // with the bot name/etc, and won't look sufficiently similar to a newline. It may also
+        // scroll the screen for people who've already scrolled to the top, etc.
         //
         // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
         let min_messages = 3usize;
