@@ -4,6 +4,7 @@ use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::FailureOr;
 
+use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -224,6 +225,7 @@ struct GuildServerState {
 }
 
 struct ChannelServer {
+    bot_user_id: UserId,
     status_channel: ChannelId,
     updates_channel: ChannelId,
 
@@ -244,12 +246,15 @@ impl ChannelServer {
         ui
     }
 
-    fn update_status_channel(
+    fn update_status_channel<S>(
         &self,
         http: &Http,
-        current_ui: &UI,
+        messages: &[S],
         existing_messages: &mut Vec<ServerUIMessage>,
-    ) -> FailureOr<()> {
+    ) -> FailureOr<()>
+    where
+        S: Borrow<str>,
+    {
         let empty_message = "_ _";
 
         // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
@@ -259,12 +264,10 @@ impl ChannelServer {
         //
         // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
         let min_messages = 3usize;
-
-        let padding_messages = min_messages.saturating_sub(current_ui.messages.len());
-        let new_messages = current_ui
-            .messages
+        let padding_messages = min_messages.saturating_sub(messages.len());
+        let new_messages = messages
             .iter()
-            .map(|x| x.as_str())
+            .map(|x| x.borrow())
             .chain(std::iter::repeat(empty_message).take(padding_messages));
 
         let mut num_messages = 0;
@@ -345,39 +348,55 @@ impl ChannelServer {
         F: FnMut() -> bool,
     {
         info!("Removing existing messages in {}", self.status_channel);
+
+        let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
         loop {
+            let max_messages = 50;
             let messages = self.status_channel.messages(http, |retriever| {
-                // 100 is a discord limitation, sadly
-                retriever.after(MessageId(0)).limit(100)
+                retriever.after(MessageId(0)).limit(max_messages)
             })?;
 
             if messages.is_empty() {
                 break;
             }
 
-            self.status_channel
-                .delete_messages(http, messages.iter().map(|x| x.id))?;
+            let mut not_mine: Vec<MessageId> = Vec::new();
+            for message in messages {
+                if message.author.id != self.bot_user_id {
+                    not_mine.push(message.id);
+                    continue;
+                }
+
+                existing_messages.push(ServerUIMessage {
+                    last_value: message.content,
+                    id: message.id,
+                });
+            }
+
+            if !not_mine.is_empty() {
+                self.status_channel.delete_messages(http, not_mine)?;
+            }
         }
+        info!(
+            "Reusing up to {} existing messages from status channel {}",
+            existing_messages.len(),
+            self.status_channel
+        );
 
         let mut current_ui: Arc<UI> = match self.ui.as_ref() {
             None => {
-                let setup_message = self.status_channel.send_message(http, |m| {
-                    m.content(concat!(
-                        ":man_construction_worker: one moment -- set-up is in ",
-                        "progress... :woman_construction_worker:"
-                    ))
-                })?;
-
-                let result = self.await_next_ui(ui);
-                self.status_channel.delete_message(http, setup_message.id)?;
-                result
+                let messages: &[&str] = &[concat!(
+                    ":man_construction_worker: one moment -- set-up is in progress... ",
+                    ":woman_construction_worker:"
+                )];
+                self.update_status_channel(http, messages, &mut existing_messages)?;
+                self.await_next_ui(ui)
             }
             Some(x) => x.clone(),
         };
 
-        let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
         loop {
-            self.update_status_channel(http, &*current_ui, &mut existing_messages)?;
+            self.update_status_channel(http, &current_ui.messages, &mut existing_messages)?;
             self.update_updates_channel(http)?;
 
             if should_exit() {
@@ -464,6 +483,7 @@ impl serenity::client::EventHandler for MessageHandler {
             None => return,
         };
 
+        let bot_user_id = ctx.cache.read().user.id;
         let http = ctx.http;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
@@ -498,6 +518,7 @@ impl serenity::client::EventHandler for MessageHandler {
             };
 
             let mut server = ChannelServer {
+                bot_user_id,
                 status_channel,
                 updates_channel,
 
