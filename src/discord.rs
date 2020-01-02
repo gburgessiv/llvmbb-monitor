@@ -894,8 +894,8 @@ impl StatusUIUpdater {
 
             write!(
                 final_section,
-                "\n- Last build was seen {} ago.",
-                duration_to_shorthand(start_time - newest_update_time)
+                "\n- Last build was seen at {} UTC.",
+                newest_update_time.format("%Y-%m-%d %H:%M:%S")
             )
             .unwrap();
 
