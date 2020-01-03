@@ -350,16 +350,20 @@ impl ChannelServer {
         info!("Removing existing messages in {}", self.status_channel);
 
         let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
+        let mut most_recent_id = MessageId(0);
         loop {
             let max_messages = 50;
             let messages = self.status_channel.messages(http, |retriever| {
-                let last_id = existing_messages.last().map(|m| m.id).unwrap_or(MessageId(0));
-                retriever.after(last_id).limit(max_messages)
+                retriever.after(most_recent_id).limit(max_messages)
             })?;
 
             if messages.is_empty() {
                 break;
             }
+
+            let new_most_recent_id = messages.iter().map(|x| x.id).max().unwrap();
+            debug_assert!(new_most_recent_id > most_recent_id, "{} <= {}?", new_most_recent_id, most_recent_id);
+            most_recent_id = new_most_recent_id;
 
             let mut not_mine: Vec<MessageId> = Vec::new();
             for message in messages {
@@ -384,6 +388,9 @@ impl ChannelServer {
             self.status_channel
         );
 
+        // Don't assume any order on the message IDs we received (they're generally new -> old per
+        // batch, but we're getting batches in the order oldest -> newest, so ...)
+        existing_messages.sort_by_key(|x| x.id);
         let mut current_ui: Arc<UI> = match self.ui.as_ref() {
             None => {
                 let messages: &[&str] = &[concat!(
