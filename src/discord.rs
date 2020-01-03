@@ -362,7 +362,12 @@ impl ChannelServer {
             }
 
             let new_most_recent_id = messages.iter().map(|x| x.id).max().unwrap();
-            debug_assert!(new_most_recent_id > most_recent_id, "{} <= {}?", new_most_recent_id, most_recent_id);
+            debug_assert!(
+                new_most_recent_id > most_recent_id,
+                "{} <= {}?",
+                new_most_recent_id,
+                most_recent_id
+            );
             most_recent_id = new_most_recent_id;
 
             let mut not_mine: Vec<MessageId> = Vec::new();
@@ -578,6 +583,24 @@ impl serenity::client::EventHandler for MessageHandler {
             // FIXME: Until Serenity supports arbitrary status setting, "Playing ${sha}" sounds
             // like my best bet...
             ctx.set_activity(Activity::playing(self.bot_version));
+        }
+    }
+
+    fn message(&self, ctx: Context, message: Message) {
+        if !message.is_private() {
+            return;
+        }
+
+        let result = message.author.direct_message(&ctx, |m| {
+            m.content(concat!(
+                "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
+                "I'm not really intended for interactive use. Please ping gburgessiv ",
+                "either on discord or github with questions. Thanks!",
+            ))
+        });
+
+        if let Err(x) = result {
+            warn!("Failed to respond to user message: {}", x);
         }
     }
 }
