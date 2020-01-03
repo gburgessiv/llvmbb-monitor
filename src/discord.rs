@@ -353,7 +353,8 @@ impl ChannelServer {
         loop {
             let max_messages = 50;
             let messages = self.status_channel.messages(http, |retriever| {
-                retriever.after(MessageId(0)).limit(max_messages)
+                let last_id = existing_messages.last().map(|m| m.id).unwrap_or(MessageId(0));
+                retriever.after(last_id).limit(max_messages)
             })?;
 
             if messages.is_empty() {
