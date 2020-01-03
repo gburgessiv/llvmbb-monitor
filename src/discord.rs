@@ -587,7 +587,7 @@ impl serenity::client::EventHandler for MessageHandler {
     }
 
     fn message(&self, ctx: Context, message: Message) {
-        if !message.is_private() {
+        if !message.is_private() || message.author.bot {
             return;
         }
 
