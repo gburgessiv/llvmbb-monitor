@@ -1000,7 +1000,6 @@ impl UpdateUIUpdater {
             .collect();
 
         let mut messages = Vec::new();
-        let need_update;
         if let Some(prev_broken) = &self.previously_broken_bots {
             for (name, build) in now_broken
                 .iter()
@@ -1035,21 +1034,14 @@ impl UpdateUIUpdater {
 
                 messages.push(this_complaint);
             }
-            need_update = messages.len() != 0 || prev_broken.len() != now_broken.len();
-        } else {
-            // Produce no messages to start with, since this channel is only meant to be pinged
-            // with new breakages.
-            need_update = true;
-        };
-
-        if need_update {
-            self.previously_broken_bots = Some(
-                now_broken
-                    .iter()
-                    .map(|(name, _)| name.to_string())
-                    .collect(),
-            );
         }
+
+        self.previously_broken_bots = Some(
+            now_broken
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect(),
+        );
 
         messages
     }
