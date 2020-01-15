@@ -999,42 +999,40 @@ impl UpdateUIUpdater {
             })
             .collect();
 
-        let mut messages = Vec::new();
-        if let Some(prev_broken) = &self.previously_broken_bots {
-            for (name, build) in now_broken
+        let messages: Vec<String> = if let Some(prev_broken) = &self.previously_broken_bots {
+            now_broken
                 .iter()
                 .filter(|(name, _)| !prev_broken.contains(*name))
-            {
-                let mut this_complaint = String::with_capacity(256);
-                write!(
-                    this_complaint,
-                    "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
-                    name, build.id
-                )
-                .unwrap();
+                .map(|(name, build)| {
+                    let mut this_complaint = String::with_capacity(256);
+                    write!(
+                        this_complaint,
+                        "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
+                        name, build.id
+                    )
+                    .unwrap();
 
-                if !build.blamelist.is_empty() {
-                    this_complaint += " (blamelist: ";
-                    for (i, email) in build.blamelist.iter().enumerate() {
-                        if i != 0 {
-                            this_complaint += ", ";
+                    if !build.blamelist.is_empty() {
+                        this_complaint += " (blamelist: ";
+                        for (i, email) in build.blamelist.iter().enumerate() {
+                            if i != 0 {
+                                this_complaint += ", ";
+                            }
+                            this_complaint += email.account_with_plus();
+                            // zero-width space to avoid `@mentions`:
+                            // https://www.fileformat.info/info/unicode/char/200b/index.htm
+                            this_complaint += "@\u{200B}";
+                            this_complaint += email.domain();
                         }
-                        this_complaint += email.account_with_plus();
-                        // If a user is being silly and `/nick`s to e.g., `@gmail.com`, they'll get
-                        // a lot of pings. Looks like `\@` doesn't work, so go go gadget unicode
-                        // hacks.
-                        //
-                        // zero-width space:
-                        // https://www.fileformat.info/info/unicode/char/200b/index.htm
-                        this_complaint += "@\u{200B}";
-                        this_complaint += email.domain();
+                        this_complaint += ")";
                     }
-                    this_complaint += ")";
-                }
 
-                messages.push(this_complaint);
-            }
-        }
+                    this_complaint
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         self.previously_broken_bots = Some(
             now_broken
