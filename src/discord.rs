@@ -1006,7 +1006,7 @@ impl UpdateUIUpdater {
                 .iter()
                 .filter(|(name, _)| !prev_broken.contains(*name))
             {
-                let mut this_complaint = String::with_capacity(128);
+                let mut this_complaint = String::with_capacity(256);
                 write!(
                     this_complaint,
                     "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
