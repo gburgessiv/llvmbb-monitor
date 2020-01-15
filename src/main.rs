@@ -142,11 +142,21 @@ impl RawBuildbotTime {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnabridgedBuildStatus {
+    blame: Vec<String>,
     builder_name: String,
     number: BuildNumber,
     #[serde(default)]
     results: RawBuildbotResult,
     times: (RawBuildbotTime, Option<RawBuildbotTime>),
+}
+
+// "Foo Bar <foo@bar.com>" => "foo@bar.com"
+// Otherwise, returns the original email unaltered.
+fn remove_name_from_email(email: &str) -> &str {
+    match (email.rfind('<'), email.rfind('>')) {
+        (Some(x), Some(y)) if x < y => &email[x+1..y],
+        _ => email,
+    }
 }
 
 impl UnabridgedBuildStatus {
@@ -156,11 +166,48 @@ impl UnabridgedBuildStatus {
             None => bail!("build has not yet completed"),
         };
 
+        let mut blamelist: Vec<Email> = Vec::with_capacity(self.blame.len());
+        for email in self.blame {
+            let email = remove_name_from_email(&email);
+            match Email::parse(email) {
+                Some(x) => blamelist.push(x),
+                None => warn!(
+                    "Failed parsing email {} for {}/{} (completed at {})",
+                    email, self.builder_name, self.number, completion_time
+                ),
+            }
+        }
+
+        blamelist.sort();
         Ok(CompletedBuild {
             id: self.number,
             status: self.results.as_buildbot_result()?,
             completion_time,
+            blamelist: blamelist,
         })
+    }
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
+struct Email {
+    address: Box<str>,
+    at_loc: usize,
+}
+
+impl Email {
+    fn parse(from: &str) -> Option<Email> {
+        from.find('@').map(|x| Email {
+            address: from.into(),
+            at_loc: x,
+        })
+    }
+
+    fn account_with_plus(&self) -> &str {
+        &self.address[..self.at_loc]
+    }
+
+    fn domain(&self) -> &str {
+        &self.address[self.at_loc+1..]
     }
 }
 
@@ -240,6 +287,9 @@ struct CompletedBuild {
     id: BuildNumber,
     status: BuildbotResult,
     completion_time: chrono::NaiveDateTime,
+    // This is 'blame' in the same way that 'git blame' is 'blame': it's the set of authors who
+    // have changes in the current build.
+    blamelist: Vec<Email>,
 }
 
 #[derive(Clone, Debug)]

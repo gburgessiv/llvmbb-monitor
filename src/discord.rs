@@ -19,6 +19,26 @@ use serenity::prelude::*;
 use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
+// TODO:
+// 1. Finish up preliminary blamelist testing.
+// 2. Make blamelists optionally ping peeps.
+//
+// 2 is going to involve creating a TUI and making use of these sqlite goodies. Concerns offhand:
+// - sqlite blocking Discord threads?
+//   - Probs not the end of the world -- we get 5 threads by default. Sqlite is reasonably fast in
+//     general. Just drink all the booze, index all the things.
+// - sqlite locking the db?
+//   - Always annoying. More something to keep in mind than a choice.
+// - non-1:1 mappings
+//   - two emails -> one user seems kinda natural if someone commits separately from e.g. their
+//     corp and personal emails.
+//   - two users -> one email is a bit more questionable. Still, forcing at most 1 user per email
+//     is an inconvenience if a rude user enters the chat.
+// - userid -> name-in-llvm resolution
+//   - (specifically, if someone _leaves_ llvm's chat, how do we detect that and autoremove the
+//      mapping/etc)
+//   - (or if someone not in #llvm to start with messages the bot)
+
 // A bit awkward to hold on purpose, so this isn't Clone/Copy/etc and unregistered multiple times
 // Auto-unregistering might be nice, but would require an Arc<InfiniteVec<_>>, or other lifetime
 // requirements on the InfiniteVec, and I'm not sure how annoying that'd be to deal with.
@@ -986,10 +1006,34 @@ impl UpdateUIUpdater {
                 .iter()
                 .filter(|(name, _)| !prev_broken.contains(*name))
             {
-                messages.push(format!(
+                let mut this_complaint = String::with_capacity(128);
+                write!(
+                    this_complaint,
                     "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
                     name, build.id
-                ));
+                )
+                .unwrap();
+
+                if !build.blamelist.is_empty() {
+                    this_complaint += " (blamelist: ";
+                    for (i, email) in build.blamelist.iter().enumerate() {
+                        if i != 0 {
+                            this_complaint += ", ";
+                        }
+                        this_complaint += email.account_with_plus();
+                        // If a user is being silly and `/nick`s to e.g., `@gmail.com`, they'll get
+                        // a lot of pings. Looks like `\@` doesn't work, so go go gadget unicode
+                        // hacks.
+                        //
+                        // zero-width space:
+                        // https://www.fileformat.info/info/unicode/char/200b/index.htm
+                        this_complaint += "@\u{200B}";
+                        this_complaint += email.domain();
+                    }
+                    this_complaint += ")";
+                }
+
+                messages.push(this_complaint);
             }
             need_update = messages.len() != 0 || prev_broken.len() != now_broken.len();
         } else {
