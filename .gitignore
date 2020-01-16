@@ -1,3 +1,4 @@
 /target
 /staging_token.txt
+/db.sqlite3
 **/*.rs.bk

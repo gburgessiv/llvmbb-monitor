@@ -326,9 +326,8 @@ impl ChannelServer {
 
     fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
         let mut associations: HashMap<Email, Vec<UserId>> = HashMap::new();
-        let mut current_message = String::new();
         while let Some(next_breakage) = self.unsent_breakages.front() {
-            current_message.clear();
+            let mut current_message = String::new();
             write!(
                 current_message,
                 "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
@@ -373,8 +372,16 @@ impl ChannelServer {
                 current_message.push(')');
             }
 
-            self.updates_channel
-                .send_message(http, |m| m.content(&current_message))?;
+            for msg in split_message(current_message, DISCORD_MESSAGE_SIZE_LIMIT) {
+                // ... Yeah, we'll end up with awkwardly resent messages if this fails and
+                // split_message gives us more than one split.
+                //
+                // On the bright side, `split_message` shouldn't do that like 99.99% of the time. I
+                // hope. 2K chars is a lot, fam.
+                self.updates_channel
+                    .send_message(http, |m| m.content(msg))?;
+            }
+
             self.unsent_breakages.pop_front();
         }
         Ok(())
@@ -639,8 +646,16 @@ impl serenity::client::EventHandler for MessageHandler {
         let result = message.author.direct_message(&ctx, |m| {
             m.content(concat!(
                 "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
-                "I'm not really intended for interactive use. Please ping gburgessiv ",
-                "either on discord or github with questions. Thanks!",
+                "Please ping gburgessiv either on discord or github with questions.\n",
+                "\n",
+                "I currently support a very smol text UI, mostly around notifications:\n",
+                "```\n",
+                "  add-email foo@bar.com -- pings you when foo@bar.com is in a \n",
+                "                           blamelest for a newly-broken build.\n",
+                "  list-emails -- lists all emails associated with your account.\n",
+                "  rm-email foo@bar.com -- disassociates foo@bar.com from your \n",
+                "                          discord account.\n",
+                "```",
             ))
         });
 
