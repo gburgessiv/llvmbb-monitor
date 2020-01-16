@@ -10,6 +10,7 @@ use serde::Deserialize;
 use tokio::sync::watch;
 
 mod discord;
+mod storage;
 
 type FailureOr<T> = Result<T, failure::Error>;
 

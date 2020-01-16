@@ -20,15 +20,10 @@ use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
 // TODO:
-// 1. Finish up preliminary blamelist testing.
-// 2. Make blamelists optionally ping peeps.
+// ## Make blamelists optionally ping peeps.
 //
-// 2 is going to involve creating a TUI and making use of these sqlite goodies. Concerns offhand:
-// - sqlite blocking Discord threads?
-//   - Probs not the end of the world -- we get 5 threads by default. Sqlite is reasonably fast in
-//     general. Just drink all the booze, index all the things.
-// - sqlite locking the db?
-//   - Always annoying. More something to keep in mind than a choice.
+// This is going to involve creating a TUI and making use of these sqlite goodies. Concerns
+// offhand:
 // - non-1:1 mappings
 //   - two emails -> one user seems kinda natural if someone commits separately from e.g. their
 //     corp and personal emails.

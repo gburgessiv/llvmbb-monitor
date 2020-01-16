@@ -20,4 +20,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serenity = "0.7"
 simple_logger = "1.3"
+# NOTE: There's an unlock_notify feature, too. Use it maybe?
+rusqlite = { version = "0.21", features = ["bundled"] }
 tokio = { version = "0.2.0-alpha.6", features = ["sync"] }
