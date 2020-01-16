@@ -189,7 +189,7 @@ impl UnabridgedBuildStatus {
     }
 }
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
+#[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
 struct Email {
     address: Box<str>,
     at_loc: usize,
@@ -602,10 +602,18 @@ fn main() -> FailureOr<()> {
                 .takes_value(true)
                 .required(true),
         )
+        .arg(
+            clap::Arg::with_name("database")
+                .long("database")
+                .takes_value(true)
+                .required(true),
+        )
         .get_matches();
 
     let discord_token = matches.value_of("discord_token").unwrap();
+    let database_file = matches.value_of("database").unwrap();
     let client = LLVMLabClient::new("http://lab.llvm.org:8011")?;
+    let storage = storage::Storage::from_file(&database_file)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
@@ -615,5 +623,6 @@ fn main() -> FailureOr<()> {
         git_version::git_version!(),
         snapshots_rx,
         tokio_rt.executor(),
+        storage,
     )
 }

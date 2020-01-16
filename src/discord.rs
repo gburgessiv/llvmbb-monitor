@@ -1,11 +1,14 @@
+use crate::storage::Storage;
 use crate::Bot;
 use crate::BotStatusSnapshot;
 use crate::BuilderState;
 use crate::CompletedBuild;
+use crate::Email;
 use crate::FailureOr;
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, Condvar, Mutex};
@@ -136,7 +139,7 @@ where
 struct UIBroadcasterState {
     version: usize,
     last_ui: Option<Arc<UI>>,
-    failed_bots: InfiniteVec<String>,
+    failed_bots: InfiniteVec<Arc<BotBuild>>,
 }
 
 #[derive(Default)]
@@ -146,7 +149,7 @@ struct UIBroadcaster {
 }
 
 impl UIBroadcaster {
-    fn publish(&self, next_ui: Arc<UI>, new_failed_builds: &[String]) {
+    fn publish(&self, next_ui: Arc<UI>, new_failed_builds: &[Arc<BotBuild>]) {
         let mut state = self.state.lock().unwrap();
         state.version += 1;
         state.last_ui = Some(next_ui);
@@ -174,7 +177,7 @@ struct UIBroadcastReceiver {
 }
 
 impl UIBroadcastReceiver {
-    fn next(&mut self) -> (Arc<UI>, Vec<String>) {
+    fn next(&mut self) -> (Arc<UI>, Vec<Arc<BotBuild>>) {
         let mut state = self.broadcaster.state.lock().unwrap();
         while state.version == self.last_version {
             state = self.broadcaster.updates.wait(state).unwrap();
@@ -248,7 +251,8 @@ struct ChannelServer {
     updates_channel: ChannelId,
 
     ui: Option<Arc<UI>>,
-    unsent_breakages: Vec<String>,
+    unsent_breakages: VecDeque<Arc<BotBuild>>,
+    storage: Arc<Mutex<Storage>>,
 }
 
 struct ServerUIMessage {
@@ -321,37 +325,57 @@ impl ChannelServer {
     }
 
     fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
-        while !self.unsent_breakages.is_empty() {
-            let mut current_message = String::new();
+        let mut associations: HashMap<Email, Vec<UserId>> = HashMap::new();
+        let mut current_message = String::new();
+        while let Some(next_breakage) = self.unsent_breakages.front() {
+            current_message.clear();
+            write!(
+                current_message,
+                "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
+                next_breakage.bot_name, next_breakage.build.id
+            )
+            .unwrap();
 
-            let mut num_messages_consumed = 0usize;
-            for breakage in &self.unsent_breakages {
-                assert!(current_message.len() <= DISCORD_MESSAGE_SIZE_LIMIT);
-                if current_message.is_empty() {
-                    current_message += breakage;
-                    num_messages_consumed += 1;
-                    continue;
+            if !next_breakage.build.blamelist.is_empty() {
+                current_message += " (blamelist: ";
+
+                for (i, email) in next_breakage.build.blamelist.iter().enumerate() {
+                    if i != 0 {
+                        current_message += ", ";
+                    }
+
+                    // Double-lookup, since I can't figure out how to appease the borrow-checker
+                    // otherwise.
+                    if associations.get(&email).is_none() {
+                        let storage = self.storage.lock().unwrap();
+                        let user_ids = storage.find_userids_for(&email)?;
+                        // FIXME: Verify that the user exists in the current channel
+                        associations.insert(email.clone(), user_ids);
+                    }
+
+                    let users_to_ping = associations.get(&email).unwrap();
+                    if users_to_ping.is_empty() {
+                        current_message += email.account_with_plus();
+                        // zero-width space to avoid `@mentions`:
+                        // https://www.fileformat.info/info/unicode/char/200b/index.htm
+                        current_message += "@\u{200B}";
+                        current_message += email.domain();
+                    } else {
+                        for (i, u) in users_to_ping.iter().enumerate() {
+                            if i != 0 {
+                                current_message += ", ";
+                            }
+                            write!(current_message, "<@{}>", u).unwrap();
+                        }
+                    }
                 }
 
-                let added_len = 1 + current_message.len();
-                if current_message.len() + added_len >= DISCORD_MESSAGE_SIZE_LIMIT {
-                    break;
-                }
-
-                current_message.push('\n');
-                current_message += breakage;
-                num_messages_consumed += 1;
+                current_message.push(')');
             }
 
             self.updates_channel
                 .send_message(http, |m| m.content(&current_message))?;
-
-            let mut i = 0usize;
-            self.unsent_breakages.retain(|_| {
-                let keep = i >= num_messages_consumed;
-                i += 1;
-                keep
-            });
+            self.unsent_breakages.pop_front();
         }
         Ok(())
     }
@@ -445,6 +469,7 @@ struct MessageHandler {
     // going to be two threads polling this ~minutely. So let's prefer simpler code.
     servers: Arc<Mutex<GuildServerState>>,
     bot_version: &'static str,
+    storage: Arc<Mutex<Storage>>,
 }
 
 impl MessageHandler {
@@ -518,6 +543,7 @@ impl serenity::client::EventHandler for MessageHandler {
         let http = ctx.http;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
+        let storage = self.storage.clone();
         std::thread::spawn(move || {
             let mut responded_with_yes = false;
             let mut should_exit = move || {
@@ -554,7 +580,8 @@ impl serenity::client::EventHandler for MessageHandler {
                 updates_channel,
 
                 ui: None,
-                unsent_breakages: Vec::new(),
+                unsent_breakages: VecDeque::new(),
+                storage: storage,
             };
             loop {
                 info!("Setting up serving for guild #{}", guild_id);
@@ -978,13 +1005,23 @@ impl StatusUIUpdater {
     }
 }
 
+// FIXME: OK, this is going to be effort. UI updates now have to be done on our bot threads.
+// Since each Guild may have sets of present users, we can no longer have one status UI to rule
+// them all (unfortunately).
+//
+// That should be... fine. Just a bit of refactoring.
 #[derive(Default, Debug)]
 struct UpdateUIUpdater {
     previously_broken_bots: Option<HashSet<String>>,
 }
 
+struct BotBuild {
+    bot_name: String,
+    build: CompletedBuild,
+}
+
 impl UpdateUIUpdater {
-    fn get_updates(&mut self, snapshot: &BotStatusSnapshot) -> Vec<String> {
+    fn get_updates(&mut self, snapshot: &BotStatusSnapshot) -> Vec<Arc<BotBuild>> {
         let now_broken: Vec<(&String, &CompletedBuild)> = snapshot
             .bots
             .iter()
@@ -997,41 +1034,6 @@ impl UpdateUIUpdater {
             })
             .collect();
 
-        let messages: Vec<String> = if let Some(prev_broken) = &self.previously_broken_bots {
-            now_broken
-                .iter()
-                .filter(|(name, _)| !prev_broken.contains(*name))
-                .map(|(name, build)| {
-                    let mut this_complaint = String::with_capacity(256);
-                    write!(
-                        this_complaint,
-                        "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
-                        name, build.id
-                    )
-                    .unwrap();
-
-                    if !build.blamelist.is_empty() {
-                        this_complaint += " (blamelist: ";
-                        for (i, email) in build.blamelist.iter().enumerate() {
-                            if i != 0 {
-                                this_complaint += ", ";
-                            }
-                            this_complaint += email.account_with_plus();
-                            // zero-width space to avoid `@mentions`:
-                            // https://www.fileformat.info/info/unicode/char/200b/index.htm
-                            this_complaint += "@\u{200B}";
-                            this_complaint += email.domain();
-                        }
-                        this_complaint += ")";
-                    }
-
-                    this_complaint
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
         self.previously_broken_bots = Some(
             now_broken
                 .iter()
@@ -1039,7 +1041,15 @@ impl UpdateUIUpdater {
                 .collect(),
         );
 
-        messages
+        now_broken
+            .into_iter()
+            .map(|(name, build)| {
+                Arc::new(BotBuild {
+                    bot_name: name.to_owned(),
+                    build: build.to_owned(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -1080,6 +1090,7 @@ pub(crate) fn run(
     bot_version: &'static str,
     snapshots: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
     executor: TaskExecutor,
+    storage: Storage,
 ) -> FailureOr<()> {
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
     executor.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
@@ -1087,6 +1098,7 @@ pub(crate) fn run(
         ui_broadcaster,
         servers: Default::default(),
         bot_version,
+        storage: Arc::new(Mutex::new(storage)),
     };
     serenity::Client::new(token, handler)?.start()?;
     Ok(())
