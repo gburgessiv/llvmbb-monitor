@@ -33,6 +33,9 @@ use tokio::sync::watch;
 //   - (specifically, if someone _leaves_ llvm's chat, how do we detect that and autoremove the
 //      mapping/etc)
 //   - (or if someone not in #llvm to start with messages the bot)
+//
+// ## Include broken stage names in #buildbot-updates (?)
+//   ...Could be useful for visually grouping things. Maybe.
 
 // A bit awkward to hold on purpose, so this isn't Clone/Copy/etc and unregistered multiple times
 // Auto-unregistering might be nice, but would require an Arc<InfiniteVec<_>>, or other lifetime
