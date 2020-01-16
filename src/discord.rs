@@ -25,17 +25,7 @@ use tokio::sync::watch;
 // TODO:
 // ## Make blamelists optionally ping peeps.
 //
-// This is going to involve creating a TUI and making use of these sqlite goodies. Concerns
-// offhand:
-// - non-1:1 mappings
-//   - two emails -> one user seems kinda natural if someone commits separately from e.g. their
-//     corp and personal emails.
-//   - two users -> one email is a bit more questionable. Still, forcing at most 1 user per email
-//     is an inconvenience if a rude user enters the chat.
-// - userid -> name-in-llvm resolution
-//   - (specifically, if someone _leaves_ llvm's chat, how do we detect that and autoremove the
-//      mapping/etc)
-//   - (or if someone not in #llvm to start with messages the bot)
+// All that's left is the TUI in theory.
 //
 // ## Include broken stage names in #buildbot-updates (?)
 //   ...Could be useful for visually grouping things. Maybe.
@@ -646,16 +636,20 @@ impl serenity::client::EventHandler for MessageHandler {
         let result = message.author.direct_message(&ctx, |m| {
             m.content(concat!(
                 "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
-                "Please ping gburgessiv either on discord or github with questions.\n",
+                "Please ping gburgessiv either on Discord or github with questions.\n",
                 "\n",
-                "I currently support a very smol text UI, mostly around notifications:\n",
+                "I currently support a very smol and humble text interface, mostly ",
+                "centered around notifications:\n",
                 "```\n",
-                "  add-email foo@bar.com -- pings you when foo@bar.com is in a \n",
-                "                           blamelest for a newly-broken build.\n",
-                "  list-emails -- lists all emails associated with your account.\n",
-                "  rm-email foo@bar.com -- disassociates foo@bar.com from your \n",
-                "                          discord account.\n",
-                "```",
+                "add-email foo@bar.com -- pings you when foo@bar.com is in a \n",
+                "                         blamelest for a newly-broken build.\n",
+                "list-emails -- lists all emails associated with your account.\n",
+                "rm-email foo@bar.com -- disassociates foo@bar.com from your \n",
+                "                        Discord account.\n",
+                "```\n",
+                "Essentially, if you choose to associate an email with your Discord ",
+                "account, you'll be `@mentioned` every time we'd otherwise mention the ",
+                "email in question. Importantly, this includes buildbot breakages.",
             ))
         });
 
@@ -1049,22 +1043,29 @@ impl UpdateUIUpdater {
             })
             .collect();
 
-        self.previously_broken_bots = Some(
+        let newly_broken = if let Some(previously_broken) = &self.previously_broken_bots {
             now_broken
                 .iter()
+                .filter(|(name, _)| !previously_broken.contains(*name))
+                .map(|(name, build)| {
+                    Arc::new(BotBuild {
+                        bot_name: (*name).to_owned(),
+                        build: (*build).to_owned(),
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        self.previously_broken_bots = Some(
+            now_broken
+                .into_iter()
                 .map(|(name, _)| name.to_string())
                 .collect(),
         );
 
-        now_broken
-            .into_iter()
-            .map(|(name, build)| {
-                Arc::new(BotBuild {
-                    bot_name: name.to_owned(),
-                    build: build.to_owned(),
-                })
-            })
-            .collect()
+        newly_broken
     }
 }
 
