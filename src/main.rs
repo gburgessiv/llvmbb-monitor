@@ -210,6 +210,10 @@ impl Email {
     fn domain(&self) -> &str {
         &self.address[self.at_loc+1..]
     }
+
+    fn address(&self) -> &str {
+        &self.address
+    }
 }
 
 struct LLVMLabClient {
