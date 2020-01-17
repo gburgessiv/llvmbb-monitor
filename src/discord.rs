@@ -6,10 +6,9 @@ use crate::CompletedBuild;
 use crate::Email;
 use crate::FailureOr;
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
-use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -479,6 +478,18 @@ fn append_discord_safe_email(targ: &mut String, email: &Email) {
     *targ += email.domain();
 }
 
+// Because I tried copy-pasting my email from a llvmbb message, and that went spectacularly poorly.
+// TODO: Maybe spell the emails with `backticks` instead?
+fn remove_zero_width_spaces<'a>(x: &'a str) -> Cow<'a, str> {
+    let space = '\u{200B}';
+    if !x.contains(space) {
+        return Cow::Borrowed(x);
+    }
+
+    let result = x.replace(space, "");
+    Cow::Owned(result)
+}
+
 fn discord_safe_email(email: &Email) -> String {
     let mut s = String::new();
     append_discord_safe_email(&mut s, email);
@@ -504,7 +515,7 @@ impl MessageHandler {
             None => return "Need an email.".into(),
         };
 
-        let email = match Email::parse(raw_email) {
+        let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
             Some(x) => x,
             None => return format!("Invalid email address: {:?}", raw_email),
         };
@@ -556,7 +567,7 @@ impl MessageHandler {
             None => return "Need an email.".into(),
         };
 
-        let email = match Email::parse(raw_email) {
+        let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
             Some(x) => x,
             None => return format!("Invalid email address: {:?}", raw_email),
         };

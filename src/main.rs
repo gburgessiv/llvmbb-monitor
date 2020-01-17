@@ -200,6 +200,7 @@ struct Email {
 impl Email {
     fn parse(from: &str) -> Option<Email> {
         from.find('@').map(|x| Email {
+            // FIXME: to_lowercase here is a bit of a hack.
             address: from.to_lowercase().into_boxed_str(),
             at_loc: x,
         })
