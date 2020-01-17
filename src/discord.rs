@@ -332,7 +332,6 @@ impl ChannelServer {
                     if associations.get(&email).is_none() {
                         let storage = self.storage.lock().unwrap();
                         let user_ids = storage.find_userids_for(&email)?;
-                        info!("User IDs for {:?} are {:?}", email.address(), user_ids);
                         // FIXME: Verify that the user exists in the current channel
                         associations.insert(email.clone(), user_ids);
                     }
@@ -351,6 +350,7 @@ impl ChannelServer {
 
                 let mut pingables: Vec<String> = pingables.into_iter().collect();
                 // TODO: This works well with just emails, but @mentions get sorta scattered.
+                // Probably solveable with the `FIXME` above about verifying that users exist?
                 pingables.sort();
 
                 current_message += " (blamelist: ";

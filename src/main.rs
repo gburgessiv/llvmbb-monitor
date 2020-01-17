@@ -179,8 +179,6 @@ impl UnabridgedBuildStatus {
             }
         }
 
-        blamelist.push(Email::parse("george.burgess.iv@gmail.com").unwrap());
-
         blamelist.sort();
         Ok(CompletedBuild {
             id: self.number,
