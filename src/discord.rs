@@ -105,7 +105,7 @@ where
             end_index,
         );
         let start_index = start_offset - self.base_offset;
-        self.values[start_index..].iter().cloned().collect()
+        self.values[start_index..].to_vec()
     }
 
     fn register(&mut self) -> InfiniteVecToken {
@@ -155,7 +155,7 @@ impl UIBroadcaster {
         UIBroadcastReceiver {
             broadcaster: me.clone(),
             last_version: 0,
-            token: token,
+            token,
         }
     }
 }
@@ -547,7 +547,7 @@ impl MessageHandler {
             }
             append_discord_safe_email(&mut result_str, &e);
         }
-        return result_str;
+        result_str
     }
 
     fn handle_remove_email(&self, from_uid: UserId, email: Option<&str>) -> String {
@@ -668,7 +668,7 @@ impl serenity::client::EventHandler for MessageHandler {
                         }
 
                         responded_with_yes = true;
-                        return true;
+                        true
                     }
                 }
             };
@@ -680,7 +680,7 @@ impl serenity::client::EventHandler for MessageHandler {
 
                 ui: None,
                 unsent_breakages: VecDeque::new(),
-                storage: storage,
+                storage,
             };
             loop {
                 info!("Setting up serving for guild #{}", guild_id);
@@ -831,7 +831,7 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
     let mut result = Vec::new();
     let mut remaining_message = message.as_str();
     while !remaining_message.is_empty() {
-        let size_threshold = match remaining_message.char_indices().skip(size_limit).next() {
+        let size_threshold = match remaining_message.char_indices().nth(size_limit) {
             Some((end_index, _)) => end_index,
             None => {
                 // Peephole for if the above message.len() check was too conservative.
@@ -845,7 +845,7 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
 
         let this_chunk: &str = &remaining_message[..size_threshold];
 
-        let end_index = match this_chunk.rfind("\n") {
+        let end_index = match this_chunk.rfind('\n') {
             Some(backest_index) => {
                 // Go hunting a bit to see if we can find a \n that isn't preceeded by another \n.
                 let mut candidate = Some(backest_index);

@@ -186,7 +186,7 @@ impl UnabridgedBuildStatus {
             id: self.number,
             status: self.results.as_buildbot_result()?,
             completion_time,
-            blamelist: blamelist,
+            blamelist,
         })
     }
 }

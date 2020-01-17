@@ -52,7 +52,7 @@ impl Storage {
                 let max_wait_time = Duration::from_millis(10);
                 std::thread::sleep(min(wait_time, max_wait_time));
             }
-            return keep_waiting;
+            keep_waiting
         }))?;
 
         Ok(Self { conn })
