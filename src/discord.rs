@@ -236,6 +236,7 @@ struct GuildServerState {
 
 struct ChannelServer {
     bot_user_id: UserId,
+    guild: GuildId,
     status_channel: ChannelId,
     updates_channel: ChannelId,
 
@@ -315,6 +316,7 @@ impl ChannelServer {
 
     fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
         let mut associations: HashMap<Email, Vec<UserId>> = HashMap::new();
+        let mut guild_members: Option<HashMap<UserId, Option<String>>> = None;
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::new();
             write!(
@@ -325,36 +327,74 @@ impl ChannelServer {
             .unwrap();
 
             if !next_breakage.build.blamelist.is_empty() {
-                let mut pingables = HashSet::with_capacity(next_breakage.build.blamelist.len());
-                for email in next_breakage.build.blamelist.iter() {
-                    // Double-lookup, since I can't figure out how to appease the borrow-checker
-                    // otherwise.
-                    if associations.get(&email).is_none() {
-                        let storage = self.storage.lock().unwrap();
-                        let user_ids = storage.find_userids_for(&email)?;
-                        // FIXME: Verify that the user exists in the current channel
-                        associations.insert(email.clone(), user_ids);
+                if guild_members.is_none() {
+                    let mut r: HashMap<UserId, Option<String>> = HashMap::new();
+                    for member in self.guild.members_iter(http) {
+                        let member = member?;
+                        r.insert(member.user.read().id, member.nick.clone());
                     }
+                    info!("Fetched {} members from #{}", r.len(), self.guild);
+                    guild_members = Some(r);
+                }
 
-                    let users_to_ping = associations.get(&email).unwrap();
-                    if users_to_ping.is_empty() {
-                        // zero-width space to avoid `@mentions`:
-                        // https://www.fileformat.info/info/unicode/char/200b/index.htm
-                        pingables.insert(discord_safe_email(email));
-                    } else {
-                        for u in users_to_ping {
-                            pingables.insert(format!("<@{}>", u));
+                let guild_members = guild_members.as_ref().unwrap();
+                {
+                    let storage = self.storage.lock().unwrap();
+                    for email in next_breakage.build.blamelist.iter() {
+                        match associations.entry(email.clone()) {
+                            Entry::Occupied(..) => {
+                                // Nothing to do, unless `storage` was updated after a prior
+                                // iteration of this loop. If that happens, eh. It's a race anyway.
+                            }
+                            Entry::Vacant(x) => {
+                                x.insert(storage.find_userids_for(&email)?);
+                            }
                         }
                     }
                 }
 
-                let mut pingables: Vec<String> = pingables.into_iter().collect();
-                // TODO: This works well with just emails, but @mentions get sorta scattered.
-                // Probably solveable with the `FIXME` above about verifying that users exist?
-                pingables.sort();
+                // Invariant: All emails in the blamelist have an entry in `associations`.
+
+                // Sometimes eliding email addresses doesn't feel like a great idea in the face of
+                // adversarial input (e.g., the owner of foo@bar.com can grab foo@baz.com so it
+                // never looks like foo@baz.com is on a blamelist, which removes some clarity and
+                // is slightly icky).
+                //
+                // On the other hand, people will hopefully be nice in practice, and it makes the
+                // UI cleaner, so...
+                let mut emails: Vec<&Email> = Vec::new();
+                let mut user_ids: HashSet<UserId> = HashSet::new();
+                for email in next_breakage.build.blamelist.iter() {
+                    let users_to_ping = associations.get(&email).unwrap();
+                    let mut pinged_anyone = false;
+                    // FIXME: Verify that the user exists in the current channel
+                    // This is pretty trivial on its own, but is it possible to do with our
+                    // cache?
+                    for u in users_to_ping {
+                        if guild_members.contains_key(&u) {
+                            pinged_anyone = true;
+                            user_ids.insert(*u);
+                        }
+                    }
+
+                    if !pinged_anyone {
+                        emails.push(email);
+                    }
+                }
+
+                // Invariant: All users in user_ids have an entry in `guild_members`.
+
+                let mut user_ids: Vec<_> = user_ids.into_iter().collect();
+                user_ids.sort_by_key(|x| (guild_members.get(x).unwrap(), *x));
+                emails.sort();
+
+                let to_blame = user_ids
+                    .into_iter()
+                    .map(|x| format!("@<!{}>", x))
+                    .chain(emails.into_iter().map(discord_safe_email));
 
                 current_message += " (blamelist: ";
-                for (i, p) in pingables.into_iter().enumerate() {
+                for (i, p) in to_blame.enumerate() {
                     if i != 0 {
                         current_message += ", ";
                     }
@@ -689,6 +729,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 status_channel,
                 updates_channel,
 
+                guild: guild_id,
                 ui: None,
                 unsent_breakages: VecDeque::new(),
                 storage,
