@@ -179,6 +179,8 @@ impl UnabridgedBuildStatus {
             }
         }
 
+        blamelist.push(Email::parse("george.burgess.iv@gmail.com").unwrap());
+
         blamelist.sort();
         Ok(CompletedBuild {
             id: self.number,
@@ -198,7 +200,7 @@ struct Email {
 impl Email {
     fn parse(from: &str) -> Option<Email> {
         from.find('@').map(|x| Email {
-            address: from.into(),
+            address: from.to_lowercase().into_boxed_str(),
             at_loc: x,
         })
     }

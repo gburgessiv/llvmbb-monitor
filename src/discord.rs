@@ -326,39 +326,41 @@ impl ChannelServer {
             .unwrap();
 
             if !next_breakage.build.blamelist.is_empty() {
-                current_message += " (blamelist: ";
-
-                for (i, email) in next_breakage.build.blamelist.iter().enumerate() {
-                    if i != 0 {
-                        current_message += ", ";
-                    }
-
+                let mut pingables = HashSet::with_capacity(next_breakage.build.blamelist.len());
+                for email in next_breakage.build.blamelist.iter() {
                     // Double-lookup, since I can't figure out how to appease the borrow-checker
                     // otherwise.
                     if associations.get(&email).is_none() {
                         let storage = self.storage.lock().unwrap();
                         let user_ids = storage.find_userids_for(&email)?;
+                        info!("User IDs for {:?} are {:?}", email.address(), user_ids);
                         // FIXME: Verify that the user exists in the current channel
                         associations.insert(email.clone(), user_ids);
                     }
 
                     let users_to_ping = associations.get(&email).unwrap();
                     if users_to_ping.is_empty() {
-                        current_message += email.account_with_plus();
                         // zero-width space to avoid `@mentions`:
                         // https://www.fileformat.info/info/unicode/char/200b/index.htm
-                        current_message += "@\u{200B}";
-                        current_message += email.domain();
+                        pingables.insert(format!("{}@\u{200B}{}", email.account_with_plus(), email.domain()));
                     } else {
-                        for (i, u) in users_to_ping.iter().enumerate() {
-                            if i != 0 {
-                                current_message += ", ";
-                            }
-                            write!(current_message, "<@{}>", u).unwrap();
+                        for u in users_to_ping {
+                            pingables.insert(format!("<@{}>", u));
                         }
                     }
                 }
 
+                let mut pingables: Vec<String> = pingables.into_iter().collect();
+                // TODO: This works well with just emails, but @mentions get sorta scattered.
+                pingables.sort();
+
+                current_message += " (blamelist: ";
+                for (i, p) in pingables.into_iter().enumerate() {
+                    if i != 0 {
+                        current_message += ", ";
+                    }
+                    current_message += &p;
+                }
                 current_message.push(')');
             }
 
@@ -490,7 +492,7 @@ impl MessageHandler {
 
         let email = match Email::parse(raw_email) {
             Some(x) => x,
-            None => return format!("Invalid email address: {:?}", email),
+            None => return format!("Invalid email address: {:?}", raw_email),
         };
 
         match self
@@ -543,7 +545,7 @@ impl MessageHandler {
 
         let email = match Email::parse(raw_email) {
             Some(x) => x,
-            None => return format!("Invalid email address: {:?}", email),
+            None => return format!("Invalid email address: {:?}", raw_email),
         };
 
         let removed = match self
@@ -726,7 +728,6 @@ impl serenity::client::EventHandler for MessageHandler {
         let mut content_fields = content.split_whitespace();
         if let Some(command) = content_fields.next() {
             let from_uid = message.author.id;
-            // FIXME: Email case-insensivity?
             match command {
                 "add-email" => {
                     response = Some(self.handle_add_email(from_uid, content_fields.next()));
@@ -763,13 +764,12 @@ impl serenity::client::EventHandler for MessageHandler {
             "email in question. Importantly, this includes buildbot breakages.",
         );
 
-        let response = response
-            .as_ref()
-            .map(|x| x as &str)
-            .unwrap_or(default_content);
-        let result = message.author.direct_message(&ctx, |m| m.content(response));
-        if let Err(x) = result {
-            warn!("Failed to respond to user message: {}", x);
+        let response = response.unwrap_or_else(|| default_content.into());
+        for msg in split_message(response, DISCORD_MESSAGE_SIZE_LIMIT) {
+            if let Err(x) = message.author.direct_message(&ctx, |m| m.content(msg)){
+                error!("Failed to respond to user message: {}", x);
+                break;
+            }
         }
     }
 }
