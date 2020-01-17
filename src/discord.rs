@@ -342,7 +342,7 @@ impl ChannelServer {
                     if users_to_ping.is_empty() {
                         // zero-width space to avoid `@mentions`:
                         // https://www.fileformat.info/info/unicode/char/200b/index.htm
-                        pingables.insert(format!("{}@\u{200B}{}", email.account_with_plus(), email.domain()));
+                        pingables.insert(discord_safe_email(email));
                     } else {
                         for u in users_to_ping {
                             pingables.insert(format!("<@{}>", u));
@@ -471,6 +471,20 @@ struct MessageHandler {
     storage: Arc<Mutex<Storage>>,
 }
 
+fn append_discord_safe_email(targ: &mut String, email: &Email) {
+    // zero-width space to avoid `@mentions`:
+    // https://www.fileformat.info/info/unicode/char/200b/index.htm
+    *targ += email.account_with_plus();
+    *targ += "@\u{200B}";
+    *targ += email.domain();
+}
+
+fn discord_safe_email(email: &Email) -> String {
+    let mut s = String::new();
+    append_discord_safe_email(&mut s, email);
+    s
+}
+
 impl MessageHandler {
     fn decref_guild_server(&self, id: GuildId) {
         let mut servers = self.servers.lock().unwrap();
@@ -531,8 +545,7 @@ impl MessageHandler {
             if i != 0 {
                 result_str += ", ";
             }
-            // FIXME: Email-to-discord-safe?
-            result_str += e.address();
+            append_discord_safe_email(&mut result_str, &e);
         }
         return result_str;
     }
@@ -766,7 +779,7 @@ impl serenity::client::EventHandler for MessageHandler {
 
         let response = response.unwrap_or_else(|| default_content.into());
         for msg in split_message(response, DISCORD_MESSAGE_SIZE_LIMIT) {
-            if let Err(x) = message.author.direct_message(&ctx, |m| m.content(msg)){
+            if let Err(x) = message.author.direct_message(&ctx, |m| m.content(msg)) {
                 error!("Failed to respond to user message: {}", x);
                 break;
             }
