@@ -1129,11 +1129,6 @@ impl StatusUIUpdater {
     }
 }
 
-// FIXME: OK, this is going to be effort. UI updates now have to be done on our bot threads.
-// Since each Guild may have sets of present users, we can no longer have one status UI to rule
-// them all (unfortunately).
-//
-// That should be... fine. Just a bit of refactoring.
 #[derive(Default, Debug)]
 struct UpdateUIUpdater {
     previously_broken_bots: Option<HashSet<String>>,
