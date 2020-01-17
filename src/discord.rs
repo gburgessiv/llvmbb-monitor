@@ -481,6 +481,93 @@ impl MessageHandler {
             }
         }
     }
+
+    fn handle_add_email(&self, from_uid: UserId, email: Option<&str>) -> String {
+        let raw_email = match email {
+            Some(x) => x,
+            None => return "Need an email.".into(),
+        };
+
+        let email = match Email::parse(raw_email) {
+            Some(x) => x,
+            None => return format!("Invalid email address: {:?}", email),
+        };
+
+        match self
+            .storage
+            .lock()
+            .unwrap()
+            .add_user_email_mapping(from_uid, &email)
+        {
+            Ok(_) => format!("OK! {} has been added as your email.", raw_email),
+            Err(x) => {
+                error!(
+                    "Failed adding email {:?} for #{}: {}",
+                    raw_email, from_uid, x
+                );
+                "Internal error :(".into()
+            }
+        }
+    }
+
+    fn handle_list_emails(&self, from_uid: UserId) -> String {
+        let mut emails = match self.storage.lock().unwrap().find_emails_for(from_uid) {
+            Ok(x) => x,
+            Err(x) => {
+                error!("Failed finding emails for #{}: {}", from_uid, x);
+                return "Internal error :(".into();
+            }
+        };
+
+        if emails.is_empty() {
+            return "No emails are associated with your account.".into();
+        }
+
+        let mut result_str = "Email(s) associated with your account: ".to_string();
+        emails.sort();
+        for (i, e) in emails.into_iter().enumerate() {
+            if i != 0 {
+                result_str += ", ";
+            }
+            // FIXME: Email-to-discord-safe?
+            result_str += e.address();
+        }
+        return result_str;
+    }
+
+    fn handle_remove_email(&self, from_uid: UserId, email: Option<&str>) -> String {
+        let raw_email = match email {
+            Some(x) => x,
+            None => return "Need an email.".into(),
+        };
+
+        let email = match Email::parse(raw_email) {
+            Some(x) => x,
+            None => return format!("Invalid email address: {:?}", email),
+        };
+
+        let removed = match self
+            .storage
+            .lock()
+            .unwrap()
+            .remove_userid_mapping(from_uid, &email)
+        {
+            Ok(removed) => removed,
+            Err(x) => {
+                error!(
+                    "Failed adding email {:?} for #{}: {}",
+                    raw_email, from_uid, x
+                );
+                return "Internal error :(".into();
+            }
+        };
+
+        if removed {
+            format!("OK! {} has been removed from your account.", raw_email)
+        } else {
+            format!("I didn't have {} on file for you.", raw_email)
+        }
+    }
 }
 
 impl serenity::client::EventHandler for MessageHandler {
@@ -633,26 +720,54 @@ impl serenity::client::EventHandler for MessageHandler {
             return;
         }
 
-        let result = message.author.direct_message(&ctx, |m| {
-            m.content(concat!(
-                "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
-                "Please ping gburgessiv either on Discord or github with questions.\n",
-                "\n",
-                "I currently support a very smol and humble text interface, mostly ",
-                "centered around notifications:\n",
-                "```\n",
-                "add-email foo@bar.com -- pings you when foo@bar.com is in a \n",
-                "                         blamelest for a newly-broken build.\n",
-                "list-emails -- lists all emails associated with your account.\n",
-                "rm-email foo@bar.com -- disassociates foo@bar.com from your \n",
-                "                        Discord account.\n",
-                "```\n",
-                "Essentially, if you choose to associate an email with your Discord ",
-                "account, you'll be `@mentioned` every time we'd otherwise mention the ",
-                "email in question. Importantly, this includes buildbot breakages.",
-            ))
-        });
+        let response: Option<String>;
 
+        let content = message.content.trim();
+        let mut content_fields = content.split_whitespace();
+        if let Some(command) = content_fields.next() {
+            let from_uid = message.author.id;
+            // FIXME: Email case-insensivity?
+            match command {
+                "add-email" => {
+                    response = Some(self.handle_add_email(from_uid, content_fields.next()));
+                }
+                "list-emails" => {
+                    response = Some(self.handle_list_emails(from_uid));
+                }
+                "rm-email" => {
+                    response = Some(self.handle_remove_email(from_uid, content_fields.next()));
+                }
+                _ => {
+                    response = None;
+                }
+            }
+        } else {
+            response = None;
+        }
+
+        let default_content = concat!(
+            "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
+            "Please ping gburgessiv either on Discord or github with questions.\n",
+            "\n",
+            "I currently support a very smol and humble text interface, mostly ",
+            "centered around notifications:\n",
+            "```\n",
+            "add-email foo@bar.com -- pings you when foo@bar.com is in a \n",
+            "                         blamelest for a newly-broken build.\n",
+            "list-emails -- lists all emails associated with your account.\n",
+            "rm-email foo@bar.com -- disassociates foo@bar.com from your \n",
+            "                        Discord account.\n",
+            "```\n",
+            "Essentially, if you choose to associate an email with your Discord ",
+            "account, you'll be `@mentioned` every time we'd otherwise mention the ",
+            "email in question. Importantly, this includes buildbot breakages.",
+        );
+
+        let response = response
+            .as_ref()
+            .map(|x| x as &str)
+            .unwrap_or(default_content);
+        let result = message.author.direct_message(&ctx, |m| m.content(response));
         if let Err(x) = result {
             warn!("Failed to respond to user message: {}", x);
         }
