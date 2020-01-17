@@ -250,6 +250,101 @@ struct ServerUIMessage {
     id: MessageId,
 }
 
+#[derive(Default)]
+struct BlamelistCache {
+    email_id_mappings: HashMap<Email, Vec<UserId>>,
+    // Cache of User ID -> Optional nickname
+    known_guild_members: Option<HashMap<UserId, Option<String>>>,
+}
+
+impl BlamelistCache {
+    fn append_blamelist(
+        &mut self,
+        target: &mut String,
+        http: &Http,
+        blamelist: &[Email],
+        guild: GuildId,
+        storage: &Mutex<Storage>,
+    ) -> FailureOr<()> {
+        if blamelist.is_empty() {
+            return Ok(());
+        }
+
+        if self.known_guild_members.is_none() {
+            let mut r: HashMap<UserId, Option<String>> = HashMap::new();
+            for member in guild.members_iter(http) {
+                let member = member?;
+                r.insert(member.user.read().id, member.nick.clone());
+            }
+            info!("Fetched {} members from #{}", r.len(), guild);
+            self.known_guild_members = Some(r);
+        }
+
+        let guild_members = self.known_guild_members.as_ref().unwrap();
+        {
+            let storage = storage.lock().unwrap();
+            for email in blamelist {
+                match self.email_id_mappings.entry(email.clone()) {
+                    Entry::Occupied(..) => {
+                        // Nothing to do, unless `storage` was updated after a prior
+                        // iteration of this loop. If that happens, eh. It's a race anyway.
+                    }
+                    Entry::Vacant(x) => {
+                        x.insert(storage.find_userids_for(&email)?);
+                    }
+                }
+            }
+        }
+
+        // Invariant: All emails in the blamelist have an entry in `email_id_mappings`.
+
+        // Sometimes eliding email addresses doesn't feel like a great idea in the face of
+        // adversarial input (e.g., the owner of foo@bar.com can grab foo@baz.com so it
+        // never looks like foo@baz.com is on a blamelist, which removes some clarity and
+        // is slightly icky).
+        //
+        // On the other hand, people will hopefully be nice in practice, and it makes the
+        // UI cleaner, so...
+        let mut emails: Vec<&Email> = Vec::new();
+        let mut user_ids: HashSet<UserId> = HashSet::new();
+        for email in blamelist {
+            let users_to_ping = self.email_id_mappings.get(&email).unwrap();
+            let mut pinged_anyone = false;
+            for u in users_to_ping {
+                if guild_members.contains_key(&u) {
+                    pinged_anyone = true;
+                    user_ids.insert(*u);
+                }
+            }
+
+            if !pinged_anyone {
+                emails.push(email);
+            }
+        }
+
+        emails.sort();
+
+        // Invariant: All users in user_ids have an entry in `guild_members`.
+        let mut user_ids: Vec<_> = user_ids.into_iter().collect();
+        user_ids.sort_by_key(|x| (guild_members.get(x).unwrap(), *x));
+
+        let to_blame = user_ids
+            .into_iter()
+            .map(|x| format!("<@{}>", x))
+            .chain(emails.into_iter().map(discord_safe_email));
+
+        *target += " (blamelist: ";
+        for (i, p) in to_blame.enumerate() {
+            if i != 0 {
+                *target += ", ";
+            }
+            *target += &p;
+        }
+        target.push(')');
+        Ok(())
+    }
+}
+
 impl ChannelServer {
     fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
         let (ui, new_breakages) = receiver.next();
@@ -315,8 +410,7 @@ impl ChannelServer {
     }
 
     fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
-        let mut associations: HashMap<Email, Vec<UserId>> = HashMap::new();
-        let mut guild_members: Option<HashMap<UserId, Option<String>>> = None;
+        let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::new();
             write!(
@@ -326,82 +420,13 @@ impl ChannelServer {
             )
             .unwrap();
 
-            if !next_breakage.build.blamelist.is_empty() {
-                if guild_members.is_none() {
-                    let mut r: HashMap<UserId, Option<String>> = HashMap::new();
-                    for member in self.guild.members_iter(http) {
-                        let member = member?;
-                        r.insert(member.user.read().id, member.nick.clone());
-                    }
-                    info!("Fetched {} members from #{}", r.len(), self.guild);
-                    guild_members = Some(r);
-                }
-
-                let guild_members = guild_members.as_ref().unwrap();
-                {
-                    let storage = self.storage.lock().unwrap();
-                    for email in next_breakage.build.blamelist.iter() {
-                        match associations.entry(email.clone()) {
-                            Entry::Occupied(..) => {
-                                // Nothing to do, unless `storage` was updated after a prior
-                                // iteration of this loop. If that happens, eh. It's a race anyway.
-                            }
-                            Entry::Vacant(x) => {
-                                x.insert(storage.find_userids_for(&email)?);
-                            }
-                        }
-                    }
-                }
-
-                // Invariant: All emails in the blamelist have an entry in `associations`.
-
-                // Sometimes eliding email addresses doesn't feel like a great idea in the face of
-                // adversarial input (e.g., the owner of foo@bar.com can grab foo@baz.com so it
-                // never looks like foo@baz.com is on a blamelist, which removes some clarity and
-                // is slightly icky).
-                //
-                // On the other hand, people will hopefully be nice in practice, and it makes the
-                // UI cleaner, so...
-                let mut emails: Vec<&Email> = Vec::new();
-                let mut user_ids: HashSet<UserId> = HashSet::new();
-                for email in next_breakage.build.blamelist.iter() {
-                    let users_to_ping = associations.get(&email).unwrap();
-                    let mut pinged_anyone = false;
-                    // FIXME: Verify that the user exists in the current channel
-                    // This is pretty trivial on its own, but is it possible to do with our
-                    // cache?
-                    for u in users_to_ping {
-                        if guild_members.contains_key(&u) {
-                            pinged_anyone = true;
-                            user_ids.insert(*u);
-                        }
-                    }
-
-                    if !pinged_anyone {
-                        emails.push(email);
-                    }
-                }
-
-                // Invariant: All users in user_ids have an entry in `guild_members`.
-
-                let mut user_ids: Vec<_> = user_ids.into_iter().collect();
-                user_ids.sort_by_key(|x| (guild_members.get(x).unwrap(), *x));
-                emails.sort();
-
-                let to_blame = user_ids
-                    .into_iter()
-                    .map(|x| format!("@<!{}>", x))
-                    .chain(emails.into_iter().map(discord_safe_email));
-
-                current_message += " (blamelist: ";
-                for (i, p) in to_blame.enumerate() {
-                    if i != 0 {
-                        current_message += ", ";
-                    }
-                    current_message += &p;
-                }
-                current_message.push(')');
-            }
+            blamelist_cache.append_blamelist(
+                &mut current_message,
+                http,
+                &next_breakage.build.blamelist,
+                self.guild,
+                &*self.storage,
+            )?;
 
             for msg in split_message(current_message, DISCORD_MESSAGE_SIZE_LIMIT) {
                 // ... Yeah, we'll end up with awkwardly resent messages if this fails and
