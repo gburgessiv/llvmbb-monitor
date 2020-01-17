@@ -1,6 +1,9 @@
 use crate::Email;
 use crate::FailureOr;
 
+use std::cmp::min;
+use std::time::Duration;
+
 use failure::bail;
 use rusqlite::params;
 use serenity::model::prelude::UserId;
@@ -17,8 +20,6 @@ pub(crate) struct Storage {
     conn: rusqlite::Connection,
 }
 
-// FIXME: Add a loop while we get sqlite3's unlocked complaints, unless rusqlite gives us that for
-// free.
 impl Storage {
     fn init_db(conn: rusqlite::Connection) -> FailureOr<Self> {
         // NOTE: we arguably over-index things, since this stuff is going to be called on discord's
@@ -40,6 +41,20 @@ impl Storage {
             "CREATE INDEX IF NOT EXISTS email_mappings_email_index",
             "    ON email_mappings(email);",
         ))?;
+
+        // Arbitrary busy handler, but should be good enough, especially given that we only ever
+        // use this db behind a mutex anyway.
+        conn.busy_handler(Some(|times_waited: i32| {
+            // 100 is arbitrary, but if we go above it, something's terribly wrong.
+            let keep_waiting = times_waited < 100;
+            if keep_waiting {
+                let wait_time = Duration::from_millis(1) * (times_waited as u32);
+                let max_wait_time = Duration::from_millis(10);
+                std::thread::sleep(min(wait_time, max_wait_time));
+            }
+            return keep_waiting;
+        }))?;
+
         Ok(Self { conn })
     }
 
