@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Syncs, builds, and runs the bot."""
 
+import argparse
 import datetime
 import itertools
 import logging
@@ -13,7 +14,7 @@ import time
 
 
 class Runner:
-    def __init__(self, exe_loc, logs_dir, discord_token):
+    def __init__(self, exe_loc, logs_dir, discord_token, database_loc):
         self._discord_token = discord_token
         self._logs_dir = logs_dir
         self._exe_loc = exe_loc
@@ -21,6 +22,7 @@ class Runner:
         self._lock = threading.Lock()
         self._cond = threading.Condition(lock=self._lock)
         self._binary_version = 0
+        self._database_loc = database_loc
 
     def run_forever(self):
         try:
@@ -54,6 +56,7 @@ class Runner:
                         [
                             self._exe_loc,
                             '--discord_token=' + self._discord_token,
+                            '--database=' + self._database_loc,
                         ],
                         stdin=subprocess.DEVNULL,
                         stdout=f,
@@ -150,6 +153,7 @@ def main():
     if not discord_token:
         sys.exit('Set DISCORD_TOKEN=something')
 
+    database_loc = os.path.join(my_dir, 'db.sqlite3')
     exe_loc = os.path.join(my_dir, 'run_bot')
     git_repo_dir = os.path.join(my_dir, 'git')
     logs_dir = os.path.join(my_dir, 'logs')
@@ -165,7 +169,7 @@ def main():
             git_repo_dir,
         ])
 
-    runner = Runner(exe_loc, logs_dir, discord_token)
+    runner = Runner(exe_loc, logs_dir, discord_token, database_loc)
     runner_thread = threading.Thread(target=runner.run_forever)
     runner_thread.daemon = True
     runner_thread.start()
