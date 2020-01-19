@@ -890,7 +890,7 @@ const DISCORD_MESSAGE_SIZE_LIMIT: usize = 1900;
 /// Similarly, Discord trims messages ( :( ), so it's generally hoped/expected that logical
 /// sections will have bold headers or something to differentiate them.
 fn split_message(message: String, size_limit: usize) -> Vec<String> {
-    assert!(size_limit != 0);
+    assert_ne!(size_limit, 0);
 
     // Cheap check for the overwhelmingly common case.
     if message.len() < size_limit {
