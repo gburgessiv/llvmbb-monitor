@@ -369,8 +369,8 @@ impl ChannelServer {
         // with the bot name/etc, and won't look sufficiently similar to a newline. It may also
         // scroll the screen for people who've already scrolled to the top, etc.
         //
-        // 3 was chosen arbitrarily. If that's exceeded (6K chars is a lot...), happy to bump it.
-        let min_messages = 3usize;
+        // This number was chosen arbitrarily.
+        let min_messages = 4usize;
         let padding_messages = min_messages.saturating_sub(messages.len());
         let new_messages = messages
             .iter()
