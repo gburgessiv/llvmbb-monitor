@@ -1,10 +1,12 @@
 use crate::storage::Storage;
 use crate::Bot;
+use crate::BotID;
 use crate::BotStatusSnapshot;
 use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
 use crate::FailureOr;
+use crate::Master;
 
 use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
@@ -412,12 +414,21 @@ impl ChannelServer {
     fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
-            let mut current_message = String::new();
-            write!(
-                current_message,
-                "**New build breakage**: http://lab.llvm.org:8011/builders/{}/builds/{}",
-                next_breakage.bot_name, next_breakage.build.id
-            )
+            let mut current_message = String::with_capacity(256);
+            current_message += "**New build breakage**: ";
+
+            match next_breakage.bot_id.master {
+                Master::GreenDragon => write!(
+                    current_message,
+                    "http://green.lab.llvm.org/green/job/{}/{}/",
+                    next_breakage.bot_id.name, next_breakage.build.id
+                ),
+                Master::Lab => write!(
+                    current_message,
+                    "http://lab.llvm.org:8011/builders/{}/builds/{}",
+                    next_breakage.bot_id.name, next_breakage.build.id
+                ),
+            }
             .unwrap();
 
             blamelist_cache.append_blamelist(
@@ -977,7 +988,7 @@ fn is_duration_recentish(dur: chrono::Duration) -> bool {
     dur < chrono::Duration::hours(12)
 }
 
-type NamedBot<'a> = (&'a str, &'a Bot);
+type NamedBot<'a> = (&'a BotID, &'a Bot);
 
 #[derive(Debug, Default)]
 struct StatusUIUpdater;
@@ -986,7 +997,7 @@ impl StatusUIUpdater {
     fn categorize_bots<'a>(
         snapshot: &'a BotStatusSnapshot,
     ) -> (Vec<(&'a str, Vec<NamedBot<'a>>)>, usize) {
-        let mut categories: HashMap<&'a str, HashMap<&'a str, &'a Bot>> = HashMap::new();
+        let mut categories: HashMap<&'a str, HashMap<&'a BotID, &'a Bot>> = HashMap::new();
         let mut skipped = 0usize;
         for (name, bot) in &snapshot.bots {
             if bot.status.state == BuilderState::Offline {
@@ -1015,7 +1026,7 @@ impl StatusUIUpdater {
 
     fn draw_main_message_from_categories(
         &mut self,
-        categories: &[(&str, Vec<(&str, &Bot)>)],
+        categories: &[(&str, Vec<(&BotID, &Bot)>)],
         now: chrono::NaiveDateTime,
     ) -> String {
         assert!(!categories.is_empty());
@@ -1130,7 +1141,7 @@ impl StatusUIUpdater {
             full_message_text += &s;
         };
 
-        let mut all_failed_bots: Vec<&str> = Vec::new();
+        let mut all_failed_bots: Vec<&BotID> = Vec::new();
         for (category_name, bots) in categorized {
             let mut failed_bots: Vec<_> = bots
                 .iter()
@@ -1150,11 +1161,11 @@ impl StatusUIUpdater {
 
             let mut this_message = String::new();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
-            for (bot_name, first_failed_time) in failed_bots {
+            for (bot_id, first_failed_time) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
                         "Apparently {:?} failed in the future (current time = {})",
-                        bot_name, start_time
+                        bot_id, start_time
                     );
                     (chrono::Duration::microseconds(0), "?m".into())
                 } else {
@@ -1170,10 +1181,15 @@ impl StatusUIUpdater {
                     ""
                 };
 
+                let url_prefix: &str = match bot_id.master {
+                    Master::GreenDragon => "http://green.lab.llvm.org/green/job/",
+                    Master::Lab => "http://lab.llvm.org:8011/builders/",
+                };
+
                 write!(
                     this_message,
-                    "\n-{} For {}: http://lab.llvm.org:8011/builders/{}",
-                    emoji, time_broken_str, bot_name
+                    "\n-{} For {}: {}/{}",
+                    emoji, time_broken_str, url_prefix, bot_id.name
                 )
                 .unwrap();
             }
@@ -1221,22 +1237,22 @@ impl StatusUIUpdater {
 
 #[derive(Default, Debug)]
 struct UpdateUIUpdater {
-    previously_broken_bots: Option<HashSet<String>>,
+    previously_broken_bots: Option<HashSet<BotID>>,
 }
 
 struct BotBuild {
-    bot_name: String,
+    bot_id: BotID,
     build: CompletedBuild,
 }
 
 impl UpdateUIUpdater {
     fn get_updates(&mut self, snapshot: &BotStatusSnapshot) -> Vec<Arc<BotBuild>> {
-        let now_broken: Vec<(&String, &CompletedBuild)> = snapshot
+        let now_broken: Vec<(&BotID, &CompletedBuild)> = snapshot
             .bots
             .iter()
-            .filter_map(|(name, bot)| {
+            .filter_map(|(id, bot)| {
                 if let Some(x) = &bot.status.first_failing_build {
-                    Some((name, x))
+                    Some((id, x))
                 } else {
                     None
                 }
@@ -1249,7 +1265,7 @@ impl UpdateUIUpdater {
                 .filter(|(name, _)| !previously_broken.contains(*name))
                 .map(|(name, build)| {
                     Arc::new(BotBuild {
-                        bot_name: (*name).to_owned(),
+                        bot_id: (*name).to_owned(),
                         build: (*build).to_owned(),
                     })
                 })
@@ -1258,12 +1274,8 @@ impl UpdateUIUpdater {
             Vec::new()
         };
 
-        self.previously_broken_bots = Some(
-            now_broken
-                .into_iter()
-                .map(|(name, _)| name.to_string())
-                .collect(),
-        );
+        self.previously_broken_bots =
+            Some(now_broken.into_iter().map(|(id, _)| id.clone()).collect());
 
         newly_broken
     }

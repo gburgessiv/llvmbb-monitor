@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fmt::Display;
 use std::iter::Fuse;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -155,7 +156,7 @@ struct UnabridgedBuildStatus {
 // Otherwise, returns the original email unaltered.
 fn remove_name_from_email(email: &str) -> &str {
     match (email.rfind('<'), email.rfind('>')) {
-        (Some(x), Some(y)) if x < y => &email[x+1..y],
+        (Some(x), Some(y)) if x < y => &email[x + 1..y],
         _ => email,
     }
 }
@@ -209,7 +210,7 @@ impl Email {
     }
 
     fn domain(&self) -> &str {
-        &self.address[self.at_loc+1..]
+        &self.address[self.at_loc + 1..]
     }
 
     fn address(&self) -> &str {
@@ -312,9 +313,69 @@ struct Bot {
     status: BotStatus,
 }
 
+// !! FIXME: greendragon notes !!
+// fhahn notes
+// """
+// @gburgessiv It looks like green.lab.llvm.org has a REST API link at the bottom of the pages for
+// the bots (and the main index), like
+// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/api/ which describes the
+// endpoints :slight_smile:
+// """
+//
+// http://green.lab.llvm.org/green/api/json is probably the main endpoint; it has things like
+// clang-stage1-cmake-RA-expensive.
+//
+// An example of a single builder's recent builds is:
+// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/api/json?pretty=true
+//
+// Current flow is that we fetch all builds for all builders, then start drilling down. Need to
+// make sure that CompletedBuild sources responsibly from both places. `id` will likely turn into
+// an enum of GreenDragon(id: int) | LLVMBB(id: int). Gotta figure out how to get a blamelist,
+// too. Rest is hopefully trivially accessible.
+//
+// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/8387/api/json?pretty=true
+// is a single build (so just add /api/json?pretty=true to a link)
+//
+// OK. So `changeSets` is left empty if it's an incomplete build, and populated if it's complete.
+// That's something to go off of, at least. They also have `authorEmail` fields, so we can pretty
+// easily turn that into a blamelist. Notably, authorEmail excludes the name of the author.
+//
+// authorEmail is once per commit in changeSets. No author name is there. If we want to map to
+// author name, we have commitId; we can maintain a llvm-project checkout and go from there, but
+// that's probably unnecessary.
+//
+// RE the build status type, we have a 'result'; "FAILURE" is one value for this. Need to figure
+// that out more deeply.
+//
+// In any case, the question I have at this point is "if we were to start fresh, how would I change
+// what's here?"
+//
+// BotStatusSnapshot is probably still appropriate, as is Bot (GreenDragon can maybe be the
+// category? Just have to hope the two don't collide.)
+// BotStatus works.
+// state works.
+// So yeah, just unifying CompletedBuild. If we're unifying greendragon and lab, it sounds like
+// those concepts are ~equally shareable. The only thing is that we'll want to differentiate
+// greendragon IDs from lab IDs. Like said, tweaking BuildNumber => BuildID and having that be
+// GreenDragon | Lab should be good enough.
+//
+// I have lotsa URLs to tweak though. Let's start with that.
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash, Ord, PartialOrd)]
+enum Master {
+    Lab,
+    GreenDragon,
+}
+
+#[derive(Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
+struct BotID {
+    master: Master,
+    name: String,
+}
+
 #[derive(Clone, Debug, Default)]
 struct BotStatusSnapshot {
-    bots: HashMap<String, Bot>,
+    bots: HashMap<BotID, Bot>,
 }
 
 struct BuildStream<'a, Iter>
@@ -499,24 +560,38 @@ async fn fetch_new_bot_status(
     }))
 }
 
+// FIXME: For The Grand Plan(TM), this is kinda ugly. Ideally, this shouldn't know about BotIDs.
 async fn fetch_new_status_snapshot(
     client: &LLVMLabClient,
     prev: &BotStatusSnapshot,
-) -> FailureOr<BotStatusSnapshot> {
-    let bot_statuses = client.fetch_full_builder_status().await?;
+) -> FailureOr<HashMap<BotID, Bot>> {
+    let bot_statuses =
+        client
+            .fetch_full_builder_status()
+            .await?
+            .into_iter()
+            .map(|(bot_name, status)| {
+                (
+                    BotID {
+                        master: Master::Lab,
+                        name: bot_name,
+                    },
+                    status,
+                )
+            });
 
-    let mut new_bots: HashMap<String, Bot> = HashMap::new();
-    for (bot_name, status) in bot_statuses.into_iter() {
+    let mut new_bots: HashMap<BotID, Bot> = HashMap::new();
+    for (bot_id, status) in bot_statuses.into_iter() {
         // This _could_ be done in independent tasks, but we only do a lot of queries and such on
         // startup, and even that only takes ~20s to go through.
-        let new_status = if let Some(last_bot) = prev.bots.get(&bot_name) {
-            update_bot_status_with_cached_builds(client, &bot_name, &status, &last_bot.status)
+        let new_status = if let Some(last_bot) = prev.bots.get(&bot_id) {
+            update_bot_status_with_cached_builds(client, &bot_id.name, &status, &last_bot.status)
                 .await?
         } else {
-            match fetch_new_bot_status(client, &bot_name, &status).await? {
+            match fetch_new_bot_status(client, &bot_id.name, &status).await? {
                 // If the bot has no builds, it's effectively dead to us.
                 None => {
-                    debug!("Ignoring {}; it has no builds", bot_name);
+                    debug!("Ignoring {:?}; it has no builds", bot_id);
                     continue;
                 }
                 Some(x) => x,
@@ -524,7 +599,7 @@ async fn fetch_new_status_snapshot(
         };
 
         new_bots.insert(
-            bot_name,
+            bot_id,
             Bot {
                 category: status.category,
                 status: new_status,
@@ -532,7 +607,7 @@ async fn fetch_new_status_snapshot(
         );
     }
 
-    Ok(BotStatusSnapshot { bots: new_bots })
+    Ok(new_bots)
 }
 
 fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
@@ -564,7 +639,7 @@ async fn publish_forever(
         ticks.recv().await.expect("ticker shut down unexpectedly");
         match fetch_new_status_snapshot(&client, &last_snapshot).await {
             Ok(snapshot) => {
-                last_snapshot = Arc::new(snapshot);
+                last_snapshot = Arc::new(BotStatusSnapshot { bots: snapshot });
                 info!(
                     "Snapshot with {} bots ({} success / {} failures) updated successfully.",
                     last_snapshot.bots.len(),
