@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fmt::Display;
 use std::iter::Fuse;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -328,11 +327,6 @@ struct Bot {
 // An example of a single builder's recent builds is:
 // http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/api/json?pretty=true
 //
-// Current flow is that we fetch all builds for all builders, then start drilling down. Need to
-// make sure that CompletedBuild sources responsibly from both places. `id` will likely turn into
-// an enum of GreenDragon(id: int) | LLVMBB(id: int). Gotta figure out how to get a blamelist,
-// too. Rest is hopefully trivially accessible.
-//
 // http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/8387/api/json?pretty=true
 // is a single build (so just add /api/json?pretty=true to a link)
 //
@@ -354,10 +348,9 @@ struct Bot {
 // category? Just have to hope the two don't collide.)
 // BotStatus works.
 // state works.
-// So yeah, just unifying CompletedBuild. If we're unifying greendragon and lab, it sounds like
-// those concepts are ~equally shareable. The only thing is that we'll want to differentiate
-// greendragon IDs from lab IDs. Like said, tweaking BuildNumber => BuildID and having that be
-// GreenDragon | Lab should be good enough.
+// completedbuild works.
+//
+// cool. so just make them not collide by adding a `master` bit to names.
 //
 // I have lotsa URLs to tweak though. Let's start with that.
 
