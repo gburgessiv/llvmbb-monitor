@@ -6,6 +6,7 @@ use log::{error, info, warn};
 use tokio::sync::watch;
 
 mod discord;
+mod greendragon;
 mod lab;
 mod storage;
 
@@ -29,7 +30,6 @@ enum BuildbotResult {
     Skipped,
     Exception,
 }
-
 
 #[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
 struct Email {
@@ -83,48 +83,6 @@ struct Bot {
     status: BotStatus,
 }
 
-// !! FIXME: greendragon notes !!
-// fhahn notes
-// """
-// @gburgessiv It looks like green.lab.llvm.org has a REST API link at the bottom of the pages for
-// the bots (and the main index), like
-// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/api/ which describes the
-// endpoints :slight_smile:
-// """
-//
-// http://green.lab.llvm.org/green/api/json is probably the main endpoint; it has things like
-// clang-stage1-cmake-RA-expensive.
-//
-// An example of a single builder's recent builds is:
-// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/api/json?pretty=true
-//
-// http://green.lab.llvm.org/green/job/clang-stage1-cmake-RA-incremental/8387/api/json?pretty=true
-// is a single build (so just add /api/json?pretty=true to a link)
-//
-// OK. So `changeSets` is left empty if it's an incomplete build, and populated if it's complete.
-// That's something to go off of, at least. They also have `authorEmail` fields, so we can pretty
-// easily turn that into a blamelist. Notably, authorEmail excludes the name of the author.
-//
-// authorEmail is once per commit in changeSets. No author name is there. If we want to map to
-// author name, we have commitId; we can maintain a llvm-project checkout and go from there, but
-// that's probably unnecessary.
-//
-// RE the build status type, we have a 'result'; "FAILURE" is one value for this. Need to figure
-// that out more deeply.
-//
-// In any case, the question I have at this point is "if we were to start fresh, how would I change
-// what's here?"
-//
-// BotStatusSnapshot is probably still appropriate, as is Bot (GreenDragon can maybe be the
-// category? Just have to hope the two don't collide.)
-// BotStatus works.
-// state works.
-// completedbuild works.
-//
-// cool. so just make them not collide by adding a `master` bit to names.
-//
-// I have lotsa URLs to tweak though. Let's start with that.
-
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash, Ord, PartialOrd)]
 enum Master {
     Lab,
@@ -162,42 +120,99 @@ fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
 }
 
 async fn publish_forever(
-    client: lab::Client,
+    lab_client: lab::Client,
+    greendragon_client: greendragon::Client,
     notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
 ) {
     let mut ticks = new_async_ticker(Duration::from_secs(60));
-    let mut last_snapshot = Arc::new(BotStatusSnapshot::default());
+    let mut last_lab_snapshot = HashMap::new();
+    let mut last_greendragon_snapshot = HashMap::new();
     loop {
         ticks.recv().await.expect("ticker shut down unexpectedly");
-        match lab::fetch_new_status_snapshot(&client, &last_snapshot).await {
+
+        // FIXME: Concurrency
+        match lab::fetch_new_status_snapshot(&lab_client, &last_lab_snapshot).await {
             Ok(snapshot) => {
-                last_snapshot = Arc::new(BotStatusSnapshot { bots: snapshot });
+                last_lab_snapshot = snapshot;
                 info!(
-                    "Snapshot with {} bots ({} success / {} failures) updated successfully.",
-                    last_snapshot.bots.len(),
-                    last_snapshot
-                        .bots
+                    "Lab snapshot with {} bots ({} success / {} failures) updated successfully.",
+                    last_lab_snapshot.len(),
+                    last_lab_snapshot
                         .values()
                         .filter(|x| x.status.first_failing_build.is_none())
                         .count(),
-                    last_snapshot
-                        .bots
+                    last_lab_snapshot
                         .values()
                         .filter(|x| x.status.first_failing_build.is_some())
                         .count(),
                 );
-
-                if notifications
-                    .broadcast(Some(last_snapshot.clone()))
-                    .is_err()
-                {
-                    warn!("All lab handles are closed; shutting down publishing loop");
-                }
             }
             Err(x) => {
-                error!("Updating bot statuses failed: {}\n{}", x, x.backtrace());
+                error!("Updating lab bot statuses failed: {}\n{}", x, x.backtrace());
+            }
+        }
+
+        match greendragon::fetch_new_status_snapshot(
+            &greendragon_client,
+            &last_greendragon_snapshot,
+        )
+        .await
+        {
+            Ok(snapshot) => {
+                last_greendragon_snapshot = snapshot;
+                info!(
+                    "Greendragon snapshot with {} bots ({} success / {} failures) updated successfully.",
+                    last_greendragon_snapshot.len(),
+                    last_greendragon_snapshot
+                        .values()
+                        .filter(|x| x.status.first_failing_build.is_none())
+                        .count(),
+                    last_greendragon_snapshot
+                        .values()
+                        .filter(|x| x.status.first_failing_build.is_some())
+                        .count(),
+                );
+            }
+            Err(x) => {
+                error!(
+                    "Updating greendragon bot statuses failed: {}\n{}",
+                    x,
+                    x.backtrace()
+                );
             }
         };
+
+        let this_snapshot: HashMap<BotID, Bot> = last_lab_snapshot
+            .iter()
+            .map(|(name, bot)| {
+                (
+                    BotID {
+                        master: Master::Lab,
+                        name: name.clone(),
+                    },
+                    bot.clone(),
+                )
+            })
+            .chain(last_greendragon_snapshot.iter().map(|(name, bot)| {
+                (
+                    BotID {
+                        master: Master::GreenDragon,
+                        name: name.clone(),
+                    },
+                    bot.clone(),
+                )
+            }))
+            .collect();
+
+        if notifications
+            .broadcast(Some(Arc::new(BotStatusSnapshot {
+                bots: this_snapshot,
+            })))
+            .is_err()
+        {
+            warn!("All lab handles are closed; shutting down publishing loop");
+            return;
+        }
     }
 }
 
@@ -220,12 +235,17 @@ fn main() -> FailureOr<()> {
 
     let discord_token = matches.value_of("discord_token").unwrap();
     let database_file = matches.value_of("database").unwrap();
-    let client = lab::Client::new("http://lab.llvm.org:8011")?;
+    let lab_client = lab::Client::new()?;
+    let greendragon_client = greendragon::Client::new()?;
     let storage = storage::Storage::from_file(&database_file)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
-    tokio_rt.spawn(publish_forever(client, snapshots_tx));
+    tokio_rt.spawn(publish_forever(
+        lab_client,
+        greendragon_client,
+        snapshots_tx,
+    ));
     discord::run(
         &discord_token,
         git_version::git_version!(),

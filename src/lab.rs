@@ -1,14 +1,11 @@
 use crate::Bot;
-use crate::BotID;
 use crate::BotStatus;
-use crate::BotStatusSnapshot;
 use crate::BuildNumber;
 use crate::BuildbotResult;
 use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
 use crate::FailureOr;
-use crate::Master;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -355,38 +352,27 @@ async fn fetch_new_bot_status(
     }))
 }
 
-// FIXME: For The Grand Plan(TM), this is kinda ugly. Ideally, this shouldn't know about BotIDs.
 pub(crate) async fn fetch_new_status_snapshot(
     client: &Client,
-    prev: &BotStatusSnapshot,
-) -> FailureOr<HashMap<BotID, Bot>> {
+    prev: &HashMap<String, Bot>,
+) -> FailureOr<HashMap<String, Bot>> {
     let bot_statuses =
         client
             .fetch_full_builder_status()
-            .await?
-            .into_iter()
-            .map(|(bot_name, status)| {
-                (
-                    BotID {
-                        master: Master::Lab,
-                        name: bot_name,
-                    },
-                    status,
-                )
-            });
+            .await?;
 
-    let mut new_bots: HashMap<BotID, Bot> = HashMap::new();
-    for (bot_id, status) in bot_statuses.into_iter() {
+    let mut new_bots: HashMap<String, Bot> = HashMap::new();
+    for (bot_name, status) in bot_statuses.into_iter() {
         // This _could_ be done in independent tasks, but we only do a lot of queries and such on
         // startup, and even that only takes ~20s to go through.
-        let new_status = if let Some(last_bot) = prev.bots.get(&bot_id) {
-            update_bot_status_with_cached_builds(client, &bot_id.name, &status, &last_bot.status)
+        let new_status = if let Some(last_bot) = prev.get(&bot_name) {
+            update_bot_status_with_cached_builds(client, &bot_name, &status, &last_bot.status)
                 .await?
         } else {
-            match fetch_new_bot_status(client, &bot_id.name, &status).await? {
+            match fetch_new_bot_status(client, &bot_name, &status).await? {
                 // If the bot has no builds, it's effectively dead to us.
                 None => {
-                    debug!("Ignoring {:?}; it has no builds", bot_id);
+                    debug!("Ignoring {:?}; it has no builds", bot_name);
                     continue;
                 }
                 Some(x) => x,
@@ -394,7 +380,7 @@ pub(crate) async fn fetch_new_status_snapshot(
         };
 
         new_bots.insert(
-            bot_id,
+            bot_name,
             Bot {
                 category: status.category,
                 status: new_status,
@@ -411,8 +397,7 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    // host is e.g., http://lab.llvm.org:8011
-    pub(crate) fn new(host: &str) -> FailureOr<Self> {
+    pub(crate) fn new() -> FailureOr<Self> {
         Ok(Self {
             client: reqwest::ClientBuilder::new()
                 // The lab can take a while to hand back results, but 60 minutes should be enough
@@ -421,7 +406,7 @@ impl Client {
                 // Don't slam lab.llvm.org.
                 .max_idle_per_host(3)
                 .build()?,
-            host: reqwest::Url::parse(host)?,
+            host: reqwest::Url::parse("http://lab.llvm.org:8011")?,
         })
     }
 
