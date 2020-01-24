@@ -1182,8 +1182,8 @@ impl StatusUIUpdater {
                 };
 
                 let url_prefix: &str = match bot_id.master {
-                    Master::GreenDragon => "http://green.lab.llvm.org/green/job/",
-                    Master::Lab => "http://lab.llvm.org:8011/builders/",
+                    Master::GreenDragon => "http://green.lab.llvm.org/green/job",
+                    Master::Lab => "http://lab.llvm.org:8011/builders",
                 };
 
                 write!(
