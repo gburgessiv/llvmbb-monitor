@@ -16,6 +16,7 @@ use std::iter::Fuse;
 use std::time::Duration;
 
 use failure::bail;
+use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use serde::Deserialize;
 
@@ -67,79 +68,22 @@ struct UnabridgedBuilderStatus;
 //
 // I have lotsa URLs to tweak though. Let's start with that.
 
+lazy_static! {
+    static ref HOST: reqwest::Url =
+        reqwest::Url::parse("http://green.lab.llvm.org").expect("parsing greendragon URL");
+}
+
 pub(crate) async fn fetch_new_status_snapshot(
-    client: &Client,
+    client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
 ) -> FailureOr<HashMap<String, Bot>> {
     Ok(HashMap::new())
 }
 
-pub(crate) struct Client {
-    client: reqwest::Client,
-    host: reqwest::Url,
-}
-
-impl Client {
-    pub(crate) fn new() -> FailureOr<Self> {
-        Ok(Self {
-            client: reqwest::ClientBuilder::new()
-                // The lab can take a while to hand back results, but 60 minutes should be enough
-                // for anybody.
-                .timeout(Duration::from_secs(60))
-                // Don't slam greendragon
-                .max_idle_per_host(3)
-                .build()?,
-            host: reqwest::Url::parse("http://green.lab.llvm.org")?,
-        })
-    }
-
-    async fn json_get<T>(&self, path: &str) -> FailureOr<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let resp = self.client.get(self.host.join(path)?).send().await?;
-        Ok(resp.json().await?)
-    }
-
-    async fn fetch_full_builder_status(
-        &self,
-    ) -> FailureOr<HashMap<String, UnabridgedBuilderStatus>> {
-        Ok(self.json_get("/json/builders").await?)
-    }
-
-    async fn fetch_build_statuses(
-        &self,
-        builder: &str,
-        numbers: &[BuildNumber],
-    ) -> FailureOr<Vec<UnabridgedBuildStatus>> {
-        if numbers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut url = format!("/json/builders/{}/builds?", builder);
-        use std::fmt::Write;
-        for (i, n) in numbers.iter().enumerate() {
-            if i != 0 {
-                url.push('&');
-            }
-            write!(url, "select={}", n).unwrap();
-        }
-
-        let mut results: HashMap<String, UnabridgedBuildStatus> = self.json_get(&url).await?;
-        let mut ordered_results: Vec<UnabridgedBuildStatus> = Vec::with_capacity(numbers.len());
-        for number in numbers {
-            match results.remove(&format!("{}", number)) {
-                Some(x) => ordered_results.push(x),
-                None => {
-                    let unique_numbers: HashSet<BuildNumber> = numbers.iter().copied().collect();
-                    if unique_numbers.len() != numbers.len() {
-                        bail!("duplicate build numbers requested: {:?}", numbers);
-                    }
-                    bail!("endpoint failed to return a build for {}", number);
-                }
-            }
-        }
-
-        Ok(ordered_results)
-    }
+async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let resp = client.get(HOST.join(path)?).send().await?;
+    Ok(resp.json().await?)
 }

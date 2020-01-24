@@ -120,8 +120,7 @@ fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
 }
 
 async fn publish_forever(
-    lab_client: lab::Client,
-    greendragon_client: greendragon::Client,
+    client: reqwest::Client,
     notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
 ) {
     let mut ticks = new_async_ticker(Duration::from_secs(60));
@@ -130,48 +129,27 @@ async fn publish_forever(
     loop {
         ticks.recv().await.expect("ticker shut down unexpectedly");
 
-        // FIXME: Concurrency
-        match lab::fetch_new_status_snapshot(&lab_client, &last_lab_snapshot).await {
+        let (lab_update, greendragon_update) = futures::future::join(
+            lab::fetch_new_status_snapshot(&client, &last_lab_snapshot),
+            greendragon::fetch_new_status_snapshot(&client, &last_greendragon_snapshot),
+        )
+        .await;
+
+        let mut update_success = false;
+        match lab_update {
             Ok(snapshot) => {
                 last_lab_snapshot = snapshot;
-                info!(
-                    "Lab snapshot with {} bots ({} success / {} failures) updated successfully.",
-                    last_lab_snapshot.len(),
-                    last_lab_snapshot
-                        .values()
-                        .filter(|x| x.status.first_failing_build.is_none())
-                        .count(),
-                    last_lab_snapshot
-                        .values()
-                        .filter(|x| x.status.first_failing_build.is_some())
-                        .count(),
-                );
+                update_success = true;
             }
             Err(x) => {
                 error!("Updating lab bot statuses failed: {}\n{}", x, x.backtrace());
             }
         }
 
-        match greendragon::fetch_new_status_snapshot(
-            &greendragon_client,
-            &last_greendragon_snapshot,
-        )
-        .await
-        {
+        match greendragon_update {
             Ok(snapshot) => {
                 last_greendragon_snapshot = snapshot;
-                info!(
-                    "Greendragon snapshot with {} bots ({} success / {} failures) updated successfully.",
-                    last_greendragon_snapshot.len(),
-                    last_greendragon_snapshot
-                        .values()
-                        .filter(|x| x.status.first_failing_build.is_none())
-                        .count(),
-                    last_greendragon_snapshot
-                        .values()
-                        .filter(|x| x.status.first_failing_build.is_some())
-                        .count(),
-                );
+                update_success = true;
             }
             Err(x) => {
                 error!(
@@ -181,6 +159,10 @@ async fn publish_forever(
                 );
             }
         };
+
+        if !update_success {
+            continue;
+        }
 
         let this_snapshot: HashMap<BotID, Bot> = last_lab_snapshot
             .iter()
@@ -204,12 +186,23 @@ async fn publish_forever(
             }))
             .collect();
 
-        if notifications
-            .broadcast(Some(Arc::new(BotStatusSnapshot {
-                bots: this_snapshot,
-            })))
-            .is_err()
-        {
+        info!(
+            "Full snapshot {} bots ({} success / {} failures) updated successfully.",
+            this_snapshot.len(),
+            this_snapshot
+                .values()
+                .filter(|x| x.status.first_failing_build.is_none())
+                .count(),
+            this_snapshot
+                .values()
+                .filter(|x| x.status.first_failing_build.is_some())
+                .count(),
+        );
+
+        let this_snapshot = Arc::new(BotStatusSnapshot {
+            bots: this_snapshot,
+        });
+        if notifications.broadcast(Some(this_snapshot)).is_err() {
             warn!("All lab handles are closed; shutting down publishing loop");
             return;
         }
@@ -235,17 +228,18 @@ fn main() -> FailureOr<()> {
 
     let discord_token = matches.value_of("discord_token").unwrap();
     let database_file = matches.value_of("database").unwrap();
-    let lab_client = lab::Client::new()?;
-    let greendragon_client = greendragon::Client::new()?;
+    let client = reqwest::ClientBuilder::new()
+        // The lab can take a while to hand back results, but 60 seconds should be enough
+        // for anybody.
+        .timeout(Duration::from_secs(60))
+        // Don't slam greendragon, either.
+        .max_idle_per_host(3)
+        .build()?;
     let storage = storage::Storage::from_file(&database_file)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
-    tokio_rt.spawn(publish_forever(
-        lab_client,
-        greendragon_client,
-        snapshots_tx,
-    ));
+    tokio_rt.spawn(publish_forever(client, snapshots_tx));
     discord::run(
         &discord_token,
         git_version::git_version!(),

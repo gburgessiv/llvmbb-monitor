@@ -13,6 +13,7 @@ use std::iter::Fuse;
 use std::time::Duration;
 
 use failure::bail;
+use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use serde::Deserialize;
 
@@ -170,12 +171,67 @@ impl UnabridgedBuildStatus {
     }
 }
 
+lazy_static! {
+    static ref HOST: reqwest::Url =
+        reqwest::Url::parse("http://lab.llvm.org:8011").expect("parsing lab URL");
+}
+
+async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let resp = client.get(HOST.join(path)?).send().await?;
+    Ok(resp.json().await?)
+}
+
+async fn fetch_full_builder_status(
+    client: &reqwest::Client,
+) -> FailureOr<HashMap<String, UnabridgedBuilderStatus>> {
+    Ok(json_get(client, "/json/builders").await?)
+}
+
+async fn fetch_build_statuses(
+    client: &reqwest::Client,
+    builder: &str,
+    numbers: &[BuildNumber],
+) -> FailureOr<Vec<UnabridgedBuildStatus>> {
+    if numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut url = format!("/json/builders/{}/builds?", builder);
+    use std::fmt::Write;
+    for (i, n) in numbers.iter().enumerate() {
+        if i != 0 {
+            url.push('&');
+        }
+        write!(url, "select={}", n).unwrap();
+    }
+
+    let mut results: HashMap<String, UnabridgedBuildStatus> = json_get(client, &url).await?;
+    let mut ordered_results: Vec<UnabridgedBuildStatus> = Vec::with_capacity(numbers.len());
+    for number in numbers {
+        match results.remove(&format!("{}", number)) {
+            Some(x) => ordered_results.push(x),
+            None => {
+                let unique_numbers: HashSet<BuildNumber> = numbers.iter().copied().collect();
+                if unique_numbers.len() != numbers.len() {
+                    bail!("duplicate build numbers requested: {:?}", numbers);
+                }
+                bail!("endpoint failed to return a build for {}", number);
+            }
+        }
+    }
+
+    Ok(ordered_results)
+}
+
 struct BuildStream<'a, Iter>
 where
     Iter: Iterator<Item = BuildNumber>,
 {
     builder_name: &'a str,
-    client: &'a Client,
+    client: &'a reqwest::Client,
     ids: Fuse<Iter>,
 
     // We batch requests behind the scenes. Most requests only get the first few builds, but can
@@ -188,7 +244,7 @@ impl<'a, Iter> BuildStream<'a, Iter>
 where
     Iter: Iterator<Item = BuildNumber>,
 {
-    fn new(builder_name: &'a str, client: &'a Client, ids: Iter) -> Self {
+    fn new(builder_name: &'a str, client: &'a reqwest::Client, ids: Iter) -> Self {
         Self {
             builder_name,
             client,
@@ -217,12 +273,7 @@ where
         self.num_fetched += to_fetch.len();
         debug!("Fetching builds {}/{:?}", self.builder_name, to_fetch);
 
-        let statuses = self
-            .client
-            .fetch_build_statuses(self.builder_name, &to_fetch)
-            .await?;
-
-        for status in statuses {
+        for status in fetch_build_statuses(self.client, self.builder_name, &to_fetch).await? {
             let id = status.number;
             match status.into_completed_build() {
                 Ok(a) => {
@@ -260,7 +311,7 @@ where
 // face of those, rather than falling over forever.
 
 async fn update_bot_status_with_cached_builds(
-    client: &Client,
+    client: &reqwest::Client,
     builder: &str,
     status: &UnabridgedBuilderStatus,
     previous: &BotStatus,
@@ -312,7 +363,7 @@ async fn update_bot_status_with_cached_builds(
 }
 
 async fn fetch_new_bot_status(
-    client: &Client,
+    client: &reqwest::Client,
     builder: &str,
     status: &UnabridgedBuilderStatus,
 ) -> FailureOr<Option<BotStatus>> {
@@ -353,13 +404,10 @@ async fn fetch_new_bot_status(
 }
 
 pub(crate) async fn fetch_new_status_snapshot(
-    client: &Client,
+    client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
 ) -> FailureOr<HashMap<String, Bot>> {
-    let bot_statuses =
-        client
-            .fetch_full_builder_status()
-            .await?;
+    let bot_statuses = fetch_full_builder_status(client).await?;
 
     let mut new_bots: HashMap<String, Bot> = HashMap::new();
     for (bot_name, status) in bot_statuses.into_iter() {
@@ -389,74 +437,4 @@ pub(crate) async fn fetch_new_status_snapshot(
     }
 
     Ok(new_bots)
-}
-
-pub(crate) struct Client {
-    client: reqwest::Client,
-    host: reqwest::Url,
-}
-
-impl Client {
-    pub(crate) fn new() -> FailureOr<Self> {
-        Ok(Self {
-            client: reqwest::ClientBuilder::new()
-                // The lab can take a while to hand back results, but 60 minutes should be enough
-                // for anybody.
-                .timeout(Duration::from_secs(60))
-                // Don't slam lab.llvm.org.
-                .max_idle_per_host(3)
-                .build()?,
-            host: reqwest::Url::parse("http://lab.llvm.org:8011")?,
-        })
-    }
-
-    async fn json_get<T>(&self, path: &str) -> FailureOr<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let resp = self.client.get(self.host.join(path)?).send().await?;
-        Ok(resp.json().await?)
-    }
-
-    async fn fetch_full_builder_status(
-        &self,
-    ) -> FailureOr<HashMap<String, UnabridgedBuilderStatus>> {
-        Ok(self.json_get("/json/builders").await?)
-    }
-
-    async fn fetch_build_statuses(
-        &self,
-        builder: &str,
-        numbers: &[BuildNumber],
-    ) -> FailureOr<Vec<UnabridgedBuildStatus>> {
-        if numbers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut url = format!("/json/builders/{}/builds?", builder);
-        use std::fmt::Write;
-        for (i, n) in numbers.iter().enumerate() {
-            if i != 0 {
-                url.push('&');
-            }
-            write!(url, "select={}", n).unwrap();
-        }
-
-        let mut results: HashMap<String, UnabridgedBuildStatus> = self.json_get(&url).await?;
-        let mut ordered_results: Vec<UnabridgedBuildStatus> = Vec::with_capacity(numbers.len());
-        for number in numbers {
-            match results.remove(&format!("{}", number)) {
-                Some(x) => ordered_results.push(x),
-                None => {
-                    let unique_numbers: HashSet<BuildNumber> = numbers.iter().copied().collect();
-                    if unique_numbers.len() != numbers.len() {
-                        bail!("duplicate build numbers requested: {:?}", numbers);
-                    }
-                    bail!("endpoint failed to return a build for {}", number);
-                }
-            }
-        }
-
-        Ok(ordered_results)
-    }
 }
