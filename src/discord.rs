@@ -347,6 +347,15 @@ impl BlamelistCache {
     }
 }
 
+fn url_escape_bot_name<'a>(bot_name: &'a str) -> Cow<'a, str> {
+    // This is the only case I have to care about at the moment.
+    if !bot_name.contains(' ') {
+        Cow::Borrowed(bot_name)
+    } else {
+        Cow::Owned(bot_name.replace(" ", "%20"))
+    }
+}
+
 impl ChannelServer {
     fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
         let (ui, new_breakages) = receiver.next();
@@ -417,27 +426,34 @@ impl ChannelServer {
             let mut current_message = String::with_capacity(256);
             current_message += "**New build breakage**: ";
 
+            let bot_name = url_escape_bot_name(&next_breakage.bot_id.name);
             match next_breakage.bot_id.master {
                 Master::GreenDragon => write!(
                     current_message,
                     "http://green.lab.llvm.org/green/job/{}/{}/",
-                    next_breakage.bot_id.name, next_breakage.build.id
+                    bot_name, next_breakage.build.id
                 ),
                 Master::Lab => write!(
                     current_message,
                     "http://lab.llvm.org:8011/builders/{}/builds/{}",
-                    next_breakage.bot_id.name, next_breakage.build.id
+                    bot_name, next_breakage.build.id
                 ),
             }
             .unwrap();
 
-            blamelist_cache.append_blamelist(
-                &mut current_message,
-                http,
-                &next_breakage.build.blamelist,
-                self.guild,
-                &*self.storage,
-            )?;
+            if next_breakage.build.blamelist.len() > 25 {
+                // Some bots have very slow turnarounds. Spraying `updates` with massive blamelists
+                // probably hurts more than it helps.
+                write!(current_message, "(blamelist: {} contributors)", next_breakage.build.blamelist.len()).unwrap();
+            } else {
+                blamelist_cache.append_blamelist(
+                    &mut current_message,
+                    http,
+                    &next_breakage.build.blamelist,
+                    self.guild,
+                    &*self.storage,
+                )?;
+            }
 
             for msg in split_message(current_message, DISCORD_MESSAGE_SIZE_LIMIT) {
                 // ... Yeah, we'll end up with awkwardly resent messages if this fails and
@@ -812,8 +828,8 @@ impl serenity::client::EventHandler for MessageHandler {
     fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
         if event.new == serenity::gateway::ConnectionStage::Connected {
             info!("New shard connection established");
-            // FIXME: Until Serenity supports arbitrary status setting, "Playing ${sha}" sounds
-            // like my best bet...
+            // Until Serenity supports arbitrary status setting, "Playing ${sha}" sounds like my
+            // best bet...
             ctx.set_activity(Activity::playing(self.bot_version));
         }
     }
@@ -1189,7 +1205,7 @@ impl StatusUIUpdater {
                 write!(
                     this_message,
                     "\n-{} For {}: {}/{}",
-                    emoji, time_broken_str, url_prefix, bot_id.name
+                    emoji, time_broken_str, url_prefix, url_escape_bot_name(&bot_id.name)
                 )
                 .unwrap();
             }

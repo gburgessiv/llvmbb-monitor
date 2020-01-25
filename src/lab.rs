@@ -10,7 +10,6 @@ use crate::FailureOr;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter::Fuse;
-use std::time::Duration;
 
 use failure::bail;
 use lazy_static::lazy_static;

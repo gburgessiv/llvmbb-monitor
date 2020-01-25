@@ -129,6 +129,7 @@ async fn publish_forever(
     loop {
         ticks.recv().await.expect("ticker shut down unexpectedly");
 
+        let start_time = Instant::now();
         let (lab_update, greendragon_update) = futures::future::join(
             lab::fetch_new_status_snapshot(&client, &last_lab_snapshot),
             greendragon::fetch_new_status_snapshot(&client, &last_greendragon_snapshot),
@@ -187,7 +188,7 @@ async fn publish_forever(
             .collect();
 
         info!(
-            "Full snapshot {} bots ({} success / {} failures) updated successfully.",
+            "Full snapshot {} bots ({} success / {} failures) updated successfully in {:?}.",
             this_snapshot.len(),
             this_snapshot
                 .values()
@@ -197,6 +198,7 @@ async fn publish_forever(
                 .values()
                 .filter(|x| x.status.first_failing_build.is_some())
                 .count(),
+            start_time.elapsed(),
         );
 
         let this_snapshot = Arc::new(BotStatusSnapshot {
