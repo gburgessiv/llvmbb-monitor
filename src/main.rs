@@ -10,7 +10,6 @@ use tokio::sync::watch;
 mod discord;
 mod greendragon;
 mod lab;
-mod macros;
 mod storage;
 
 type FailureOr<T> = Result<T, failure::Error>;
@@ -211,8 +210,9 @@ async fn publish_forever(
             }))
             .collect();
 
+        let elapsed_time = start_time.elapsed();
         info!(
-            "Full snapshot {} bots ({} success / {} failures) updated successfully in {:?}.",
+            "Full snapshot of {} bots ({} success / {} failures) updated successfully in {}.{:03}s.",
             this_snapshot.len(),
             this_snapshot
                 .values()
@@ -222,7 +222,8 @@ async fn publish_forever(
                 .values()
                 .filter(|x| x.status.first_failing_build.is_some())
                 .count(),
-            start_time.elapsed(),
+            elapsed_time.as_secs(),
+            elapsed_time.subsec_millis(),
         );
 
         let this_snapshot = Arc::new(BotStatusSnapshot {

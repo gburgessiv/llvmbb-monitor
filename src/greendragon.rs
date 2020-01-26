@@ -280,8 +280,8 @@ async fn fetch_single_bot_status_snapshot(
         // categories, too?
         category: "GreenDragon".to_owned(),
         status: BotStatus {
-            first_failing_build: first_failing_build,
-            most_recent_build: most_recent_build,
+            first_failing_build,
+            most_recent_build,
             state: match color {
                 Color::Disabled => BuilderState::Offline,
                 Color::Red { flashing } => {
@@ -431,6 +431,6 @@ async fn fetch_completed_build(
             RawBuildResult::Failure => BuildbotResult::Failure,
         },
         completion_time: data.timestamp.as_datetime()?,
-        blamelist: blamelist,
+        blamelist,
     })
 }
