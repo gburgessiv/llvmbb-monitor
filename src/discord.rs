@@ -24,10 +24,6 @@ use tokio::runtime::TaskExecutor;
 use tokio::sync::watch;
 
 // TODO:
-// ## Make blamelists optionally ping peeps.
-//
-// All that's left is the TUI in theory.
-//
 // ## Include broken stage names in #buildbot-updates (?)
 //   ...Could be useful for visually grouping things. Maybe.
 
@@ -584,7 +580,6 @@ fn append_discord_safe_email(targ: &mut String, email: &Email) {
 }
 
 // Because I tried copy-pasting my email from a llvmbb message, and that went spectacularly poorly.
-// TODO: Maybe spell the emails with `backticks` instead?
 fn remove_zero_width_spaces<'a>(x: &'a str) -> Cow<'a, str> {
     let space = '\u{200B}';
     if !x.contains(space) {
@@ -841,8 +836,6 @@ impl serenity::client::EventHandler for MessageHandler {
     fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
         if event.new == serenity::gateway::ConnectionStage::Connected {
             info!("New shard connection established");
-            // Until Serenity supports arbitrary status setting, "Playing ${sha}" sounds like my
-            // best bet...
             ctx.set_activity(Activity::playing(self.bot_version));
         }
     }
