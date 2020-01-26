@@ -1,3 +1,5 @@
+#![feature(is_sorted)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,6 +10,7 @@ use tokio::sync::watch;
 mod discord;
 mod greendragon;
 mod lab;
+mod macros;
 mod storage;
 
 type FailureOr<T> = Result<T, failure::Error>;
@@ -98,6 +101,24 @@ struct BotID {
 #[derive(Clone, Debug, Default)]
 struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
+}
+
+#[macro_export]
+macro_rules! try_with_context {
+    ($x:expr, $s:expr, $($xs:expr),*) => {{
+        match $x {
+            Ok(y) => y,
+            Err(x) => {
+                let mut msg = format!($s, $($xs),*);
+                msg += ": ";
+
+                use std::fmt::Write;
+                msg.write_fmt(format_args!("{}", x)).unwrap();
+                let x: failure::Error = x.into();
+                return Err(x.context(msg).into());
+            }
+        }
+    }}
 }
 
 fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {

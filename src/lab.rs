@@ -1,3 +1,4 @@
+use crate::try_with_context;
 use crate::Bot;
 use crate::BotStatus;
 use crate::BuildNumber;
@@ -179,8 +180,17 @@ async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let resp = client.get(HOST.join(path)?).send().await?;
-    Ok(resp.json().await?)
+    let resp = try_with_context!(
+        client
+            .get(HOST.join(path)?)
+            .send()
+            .await
+            .and_then(|x| x.error_for_status()),
+        "requesting {}",
+        path
+    );
+
+    Ok(try_with_context!(resp.json().await, "parsing {}", path))
 }
 
 async fn fetch_full_builder_status(
@@ -406,6 +416,10 @@ pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
 ) -> FailureOr<HashMap<String, Bot>> {
+    if true {
+        return Ok(HashMap::new());
+    }
+
     let bot_statuses = fetch_full_builder_status(client).await?;
 
     let mut new_bots: HashMap<String, Bot> = HashMap::new();

@@ -1,3 +1,4 @@
+use crate::try_with_context;
 use crate::Bot;
 use crate::BotStatus;
 use crate::BuildNumber;
@@ -12,7 +13,7 @@ use std::fmt;
 
 use failure::bail;
 use lazy_static::lazy_static;
-use log::warn;
+use log::{error, info, warn};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -26,32 +27,20 @@ lazy_static! {
         reqwest::Url::parse("http://green.lab.llvm.org").expect("parsing greendragon URL");
 }
 
-macro_rules! try_with_context {
-    ($x:expr, $s:expr, $($xs:expr),*) => {{
-        match $x {
-            Ok(y) => y,
-            Err(x) => {
-                let mut msg = format!($s, $($xs),*);
-                msg += ": ";
-
-                use std::fmt::Write;
-                msg.write_fmt(format_args!("{}", x)).unwrap();
-                let x: failure::Error = x.into();
-                return Err(x.context(msg).into());
-            }
-        }
-    }}
-}
-
 async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
 where
     T: serde::de::DeserializeOwned,
 {
     let resp = try_with_context!(
-        client.get(HOST.join(path)?).send().await,
+        client
+            .get(HOST.join(path)?)
+            .send()
+            .await
+            .and_then(|x| x.error_for_status()),
         "requesting {}",
         path
     );
+
     Ok(try_with_context!(resp.json().await, "parsing {}", path))
 }
 
@@ -132,7 +121,65 @@ struct RawStatusBuild {
     number: BuildNumber,
 }
 
-// http://green.lab.llvm.org/green/view/All/job/clang-stage1-cmake-RA-incremental/api/json?pretty=true
+async fn find_first_failing_build(
+    client: &reqwest::Client,
+    bot_name: &str,
+    build_list: &[RawStatusBuild],
+    last_successful: Option<BuildNumber>,
+    last_failure: BuildNumber,
+) -> FailureOr<CompletedBuild> {
+    debug_assert!(build_list.is_sorted_by_key(|x| x.number));
+
+    let search_start: usize = if let Some(s) = last_successful {
+        assert!(last_failure > s, "{} should be > {}", last_failure, s);
+        match build_list.binary_search_by_key(&s, |x| x.number) {
+            Ok(n) => n + 1,
+            Err(n) => n,
+        }
+    } else {
+        0
+    };
+
+    for build_number in build_list[search_start..].iter().map(|x| x.number) {
+        match fetch_completed_build(client, bot_name, build_number).await {
+            Err(x) => {
+                let root_cause = x.find_root_cause();
+                if let Some(x) = root_cause.downcast_ref::<reqwest::Error>() {
+                    if x.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                        info!(
+                            "Finding first failing build for {:?} 404'ed on {}; trying another...",
+                            bot_name, build_number
+                        );
+                        continue;
+                    }
+                }
+                return Err(x);
+            }
+            Ok(x) => {
+                if x.status != BuildbotResult::Success {
+                    return Ok(x);
+                }
+                error!(
+                    concat!(
+                        "Lies? Build {:?}/{} is reported successful, when it should've ",
+                        "failed. Most recent successful == {:?}.",
+                    ),
+                    bot_name, build_number, last_successful
+                );
+            }
+        }
+    }
+
+    let candidates: Vec<BuildNumber> = build_list.iter().map(|x| x.number).collect();
+    // This is possible if either build_list is empty, or if we raced and somehow jenkins dropped N
+    // builds on the floor. So mostly just that first part.
+    bail!(
+        "no available builds > {:?} for {:?} (candidates: {:?})",
+        last_successful,
+        bot_name,
+        candidates
+    );
+}
 
 // It's sorta interesting that the JSON has a few fields here. We have all of:
 // - lastCompletedBuild
@@ -160,8 +207,12 @@ async fn fetch_single_bot_status_snapshot(
     name: &str,
     color: Color,
 ) -> FailureOr<Option<Bot>> {
-    let status: RawBotStatus =
-        json_get(client, &format!("/green/view/All/job/{}/api/json", name)).await?;
+    let status: RawBotStatus = {
+        let mut status: RawBotStatus =
+            json_get(client, &format!("/green/view/All/job/{}/api/json", name)).await?;
+        status.builds.sort_by_key(|x| x.number);
+        status
+    };
 
     let last_build_id = match status.last_completed_build {
         Some(x) => x.number,
@@ -172,14 +223,14 @@ async fn fetch_single_bot_status_snapshot(
         }
     };
 
-    let last_failing: Option<&CompletedBuild>;
+    let last_first_failing: Option<&CompletedBuild>;
     if let Some(prev_state) = prev {
         if prev_state.status.most_recent_build.id == last_build_id {
             return Ok(Some(prev_state.clone()));
         }
-        last_failing = prev_state.status.first_failing_build.as_ref();
+        last_first_failing = prev_state.status.first_failing_build.as_ref();
     } else {
-        last_failing = None;
+        last_first_failing = None;
     }
 
     let first_failing_build: Option<CompletedBuild>;
@@ -195,16 +246,27 @@ async fn fetch_single_bot_status_snapshot(
             first_failing_build = None;
         }
         (None, Some(u)) => {
-            first_failing_build = Some(match last_failing {
+            first_failing_build = Some(match last_first_failing {
                 Some(x) => x.clone(),
-                None => fetch_completed_build(client, name, u.number).await?,
+                None => {
+                    find_first_failing_build(client, name, &status.builds, None, u.number).await?
+                }
             });
         }
         (Some(s), Some(u)) => {
             first_failing_build = if u.number > s.number {
-                match last_failing {
+                match last_first_failing {
                     Some(x) => Some(x.clone()),
-                    None => Some(fetch_completed_build(client, name, u.number).await?),
+                    None => Some(
+                        find_first_failing_build(
+                            client,
+                            name,
+                            &status.builds,
+                            Some(s.number),
+                            u.number,
+                        )
+                        .await?,
+                    ),
                 }
             } else {
                 None
@@ -351,7 +413,7 @@ async fn fetch_completed_build(
     id: BuildNumber,
 ) -> FailureOr<CompletedBuild> {
     let data: BuildResult =
-        json_get(client, &format!("green/job/{}/{}/api/json?pretty=true", bot_name, id)).await?;
+        json_get(client, &format!("green/job/{}/{}/api/json", bot_name, id)).await?;
 
     let mut blamelist = Vec::new();
     for change_set in data.change_set.items.into_iter() {
