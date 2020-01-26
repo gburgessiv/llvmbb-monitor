@@ -416,10 +416,6 @@ pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
 ) -> FailureOr<HashMap<String, Bot>> {
-    if true {
-        return Ok(HashMap::new());
-    }
-
     let bot_statuses = fetch_full_builder_status(client).await?;
 
     let mut new_bots: HashMap<String, Bot> = HashMap::new();
