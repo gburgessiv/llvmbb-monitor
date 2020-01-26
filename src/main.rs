@@ -72,6 +72,9 @@ struct CompletedBuild {
     blamelist: Vec<Email>,
 }
 
+// FIXME: Adding a 'certain' field and surfacing that in discord may be nice? If a bot history goes
+// back up to 7 weeks, we're doomed to always report 7wks + $(uptiem) of brokenness for the bot.
+// Would be nice to put a '>' there.
 #[derive(Clone, Debug)]
 struct BotStatus {
     // If the most_recent_build is red, this'll be the first build we know of that failed.
