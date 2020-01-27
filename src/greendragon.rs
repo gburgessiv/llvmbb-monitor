@@ -308,6 +308,9 @@ pub(crate) async fn fetch_new_status_snapshot(
     prev: &HashMap<String, Bot>,
 ) -> FailureOr<HashMap<String, Bot>> {
     let mut result = HashMap::new();
+    if true {
+        return Ok(result);
+    }
 
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
