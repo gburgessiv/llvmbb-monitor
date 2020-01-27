@@ -356,6 +356,14 @@ fn url_escape_bot_name<'a>(bot_name: &'a str) -> Cow<'a, str> {
     }
 }
 
+// Hack: keep a minimum of `MESSAGE_CACHE_SIZE` around for splitting. Otherwise, we might end up
+// writing a new message a while after we start. This is problematic, because it'll show up with
+// the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll the
+// screen for people who've already scrolled to the top, etc.
+//
+// This number was chosen arbitrarily.
+const MESSAGE_CACHE_SIZE: usize = 5;
+
 impl ChannelServer {
     fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
         let (ui, new_breakages) = receiver.next();
@@ -374,15 +382,7 @@ impl ChannelServer {
         S: Borrow<str>,
     {
         let empty_message = "_ _";
-
-        // Hack: keep a minimum of `min_messages` around for splitting. Otherwise, we might end up
-        // writing a new message a while after we start. This is problematic, because it'll show up
-        // with the bot name/etc, and won't look sufficiently similar to a newline. It may also
-        // scroll the screen for people who've already scrolled to the top, etc.
-        //
-        // This number was chosen arbitrarily.
-        let min_messages = 4usize;
-        let padding_messages = min_messages.saturating_sub(messages.len());
+        let padding_messages = MESSAGE_CACHE_SIZE.saturating_sub(messages.len());
         let new_messages = messages
             .iter()
             .map(|x| x.borrow())
@@ -519,11 +519,24 @@ impl ChannelServer {
                 self.status_channel.delete_messages(http, not_mine)?;
             }
         }
-        info!(
-            "Reusing up to {} existing messages from status channel {}",
-            existing_messages.len(),
-            self.status_channel
-        );
+
+        // Mixing new messages + old messages can cause unsightly separators.
+        if existing_messages.len() < MESSAGE_CACHE_SIZE {
+            info!(
+                "{} existing messages in #{}, which is < {}; starting with a clean slate",
+                existing_messages.len(),
+                self.status_channel,
+                MESSAGE_CACHE_SIZE
+            );
+            self.status_channel.delete_messages(http, existing_messages.iter().map(|x| x.id))?;
+            existing_messages.clear();
+        } else {
+            info!(
+                "Reusing up to {} existing messages from status channel #{}",
+                existing_messages.len(),
+                self.status_channel
+            );
+        }
 
         // Don't assume any order on the message IDs we received (they're generally new -> old per
         // batch, but we're getting batches in the order oldest -> newest, so ...)
