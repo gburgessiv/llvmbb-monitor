@@ -403,8 +403,12 @@ struct ChangeSetListing {
 struct BuildResult {
     timestamp: RawBuildbotTime,
     result: RawBuildResult,
+
+    // A single BuildResult can have either `changeSet` or `changeSets`. Both have different types.
     #[serde(default)]
-    change_set: ChangeSetListing,
+    change_set: Option<ChangeSetListing>,
+    #[serde(default)]
+    change_sets: Vec<ChangeSetListing>,
 }
 
 async fn fetch_completed_build(
@@ -416,10 +420,18 @@ async fn fetch_completed_build(
         json_get(client, &format!("green/job/{}/{}/api/json", bot_name, id)).await?;
 
     let mut blamelist = Vec::new();
-    for change_set in data.change_set.items.into_iter() {
-        match Email::parse(&change_set.author_email) {
-            Some(x) => blamelist.push(x),
-            None => warn!("Unparseable email: {:?}", &change_set.author_email),
+    let all_change_sets: Vec<ChangeSetListing>;
+    if let Some(x) = data.change_set {
+        all_change_sets = vec![x];
+    } else {
+        all_change_sets = data.change_sets;
+    }
+    for change_sets in all_change_sets {
+        for change_set in change_sets.items {
+            match Email::parse(&change_set.author_email) {
+                Some(x) => blamelist.push(x),
+                None => warn!("Unparseable email: {:?}", &change_set.author_email),
+            }
         }
     }
 
