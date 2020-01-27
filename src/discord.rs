@@ -440,7 +440,12 @@ impl ChannelServer {
             if next_breakage.build.blamelist.len() > 25 {
                 // Some bots have very slow turnarounds. Spraying `updates` with massive blamelists
                 // probably hurts more than it helps.
-                write!(current_message, "(blamelist: {} contributors)", next_breakage.build.blamelist.len()).unwrap();
+                write!(
+                    current_message,
+                    "(blamelist: {} contributors)",
+                    next_breakage.build.blamelist.len()
+                )
+                .unwrap();
             } else {
                 blamelist_cache.append_blamelist(
                     &mut current_message,
@@ -511,8 +516,10 @@ impl ChannelServer {
                 });
             }
 
-            if !not_mine.is_empty() {
-                self.status_channel.delete_messages(http, not_mine)?;
+            for message_id in not_mine {
+                // "You can only bulk delete messages that are under 14 days old," so no bulk
+                // delete API for us.
+                self.status_channel.delete_message(http, message_id)?;
             }
         }
 
@@ -524,7 +531,11 @@ impl ChannelServer {
                 self.status_channel,
                 MESSAGE_CACHE_SIZE
             );
-            self.status_channel.delete_messages(http, existing_messages.iter().map(|x| x.id))?;
+            for msg in &existing_messages {
+                // "You can only bulk delete messages that are under 14 days old," so no bulk
+                // delete API for us.
+                self.status_channel.delete_message(http, msg.id)?;
+            }
             existing_messages.clear();
         } else {
             info!(
@@ -1211,7 +1222,10 @@ impl StatusUIUpdater {
                 write!(
                     this_message,
                     "\n-{} For {}: {}/{}",
-                    emoji, time_broken_str, url_prefix, url_escape_bot_name(&bot_id.name)
+                    emoji,
+                    time_broken_str,
+                    url_prefix,
+                    url_escape_bot_name(&bot_id.name)
                 )
                 .unwrap();
             }
