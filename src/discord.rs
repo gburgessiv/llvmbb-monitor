@@ -443,7 +443,7 @@ impl ChannelServer {
                 // probably hurts more than it helps.
                 write!(
                     current_message,
-                    "(blamelist: {} contributors)",
+                    " (blamelist: {} contributors)",
                     next_breakage.build.blamelist.len()
                 )
                 .unwrap();
