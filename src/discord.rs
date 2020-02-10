@@ -420,7 +420,7 @@ impl ChannelServer {
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
-            current_message += "**New build breakage**: ";
+            current_message += "**New build breakage**: <";
 
             let bot_name = url_escape_bot_name(&next_breakage.bot_id.name);
             match next_breakage.bot_id.master {
@@ -437,6 +437,7 @@ impl ChannelServer {
             }
             .unwrap();
 
+            current_message.push('>');
             if next_breakage.build.blamelist.len() > 25 {
                 // Some bots have very slow turnarounds. Spraying `updates` with massive blamelists
                 // probably hurts more than it helps.
@@ -1221,7 +1222,7 @@ impl StatusUIUpdater {
 
                 write!(
                     this_message,
-                    "\n-{} For {}: {}/{}",
+                    "\n-{} For {}: <{}/{}>",
                     emoji,
                     time_broken_str,
                     url_prefix,
