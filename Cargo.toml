@@ -10,7 +10,6 @@ opt-level = 2
 panic = "abort"
 
 [dependencies]
-# NOTE: There's an unlock_notify feature, too. Use it maybe?
 chrono = "0.4"
 clap = "2.33"
 failure = "0.1"
