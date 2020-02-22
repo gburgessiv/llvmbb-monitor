@@ -343,7 +343,7 @@ impl BlamelistCache {
     }
 }
 
-fn url_escape_bot_name<'a>(bot_name: &'a str) -> Cow<'a, str> {
+fn url_escape_bot_name(bot_name: &str) -> Cow<'_, str> {
     // This is the only case I have to care about at the moment.
     if !bot_name.contains(' ') {
         Cow::Borrowed(bot_name)
