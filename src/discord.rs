@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use log::{error, info, warn};
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serenity::http::raw::Http;
+use serenity::http::Http;
 use serenity::model::prelude::*;
 use serenity::prelude::*;
-use tokio::runtime::TaskExecutor;
+use tokio::runtime::Runtime;
 use tokio::sync::watch;
 
 // TODO:
@@ -1355,11 +1355,11 @@ pub(crate) fn run(
     token: &str,
     bot_version: &'static str,
     snapshots: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
-    executor: TaskExecutor,
+    runtime: Runtime,
     storage: Storage,
 ) -> FailureOr<()> {
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
-    executor.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
+    runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
     let handler = MessageHandler {
         ui_broadcaster,
         servers: Default::default(),

@@ -132,7 +132,7 @@ fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
             let now = Instant::now();
 
             start = if now < ideal_next {
-                tokio::timer::delay(ideal_next).await;
+                tokio::time::delay_until(ideal_next.into()).await;
                 ideal_next
             } else {
                 now
@@ -271,7 +271,7 @@ fn main() -> FailureOr<()> {
         &discord_token,
         git_version::git_version!(),
         snapshots_rx,
-        tokio_rt.executor(),
+        tokio_rt,
         storage,
     )
 }
