@@ -592,7 +592,7 @@ fn append_discord_safe_email(targ: &mut String, email: &Email) {
 }
 
 // Because I tried copy-pasting my email from a llvmbb message, and that went spectacularly poorly.
-fn remove_zero_width_spaces<'a>(x: &'a str) -> Cow<'a, str> {
+fn remove_zero_width_spaces(x: &str) -> Cow<'_, str> {
     let space = '\u{200B}';
     if !x.contains(space) {
         return Cow::Borrowed(x);
