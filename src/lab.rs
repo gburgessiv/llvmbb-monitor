@@ -128,8 +128,10 @@ struct UnabridgedBuildStatus {
     blame: Vec<String>,
     builder_name: String,
     number: BuildNumber,
+    // This may be either omitted (unsure why) or null (buildbot was killed in the middle of a
+    // build).
     #[serde(default)]
-    results: RawBuildbotResult,
+    results: Option<RawBuildbotResult>,
     times: (RawBuildbotTime, Option<RawBuildbotTime>),
 }
 
@@ -144,6 +146,11 @@ fn remove_name_from_email(email: &str) -> &str {
 
 impl UnabridgedBuildStatus {
     fn into_completed_build(self) -> FailureOr<CompletedBuild> {
+        let status = match self.results {
+            Some(x) => x.as_buildbot_result()?,
+            None => bail!("no `results` field available"),
+        };
+
         let completion_time: chrono::NaiveDateTime = match self.times.1 {
             Some(x) => x.as_datetime()?,
             None => bail!("build has not yet completed"),
@@ -164,7 +171,7 @@ impl UnabridgedBuildStatus {
         blamelist.sort();
         Ok(CompletedBuild {
             id: self.number,
-            status: self.results.as_buildbot_result()?,
+            status,
             completion_time,
             blamelist,
         })
