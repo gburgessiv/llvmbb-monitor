@@ -1,10 +1,9 @@
 use crate::Email;
-use crate::FailureOr;
 
 use std::cmp::min;
 use std::time::Duration;
 
-use failure::bail;
+use anyhow::{bail, Result};
 use rusqlite::params;
 use serenity::model::prelude::UserId;
 
@@ -21,7 +20,7 @@ pub(crate) struct Storage {
 }
 
 impl Storage {
-    fn init_db(conn: rusqlite::Connection) -> FailureOr<Self> {
+    fn init_db(conn: rusqlite::Connection) -> Result<Self> {
         // NOTE: we arguably over-index things, since this stuff is going to be called on discord's
         // "main" threads. In practice, this shouldn't be a problem, but having things on the open
         // internet always makes me a bit sketched out.
@@ -59,15 +58,15 @@ impl Storage {
     }
 
     #[cfg(test)]
-    fn from_memory() -> FailureOr<Self> {
+    fn from_memory() -> Result<Self> {
         Self::init_db(rusqlite::Connection::open_in_memory()?)
     }
 
-    pub(crate) fn from_file(file_path: &str) -> FailureOr<Self> {
+    pub(crate) fn from_file(file_path: &str) -> Result<Self> {
         Self::init_db(rusqlite::Connection::open(file_path)?)
     }
 
-    pub(crate) fn add_user_email_mapping(&self, id: UserId, email: &Email) -> FailureOr<()> {
+    pub(crate) fn add_user_email_mapping(&self, id: UserId, email: &Email) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO email_mappings (user_id, email) VALUES (?, ?)",
             params![userid_to_db(id), email.address()],
@@ -75,7 +74,7 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) fn find_userids_for(&self, email: &Email) -> FailureOr<Vec<UserId>> {
+    pub(crate) fn find_userids_for(&self, email: &Email) -> Result<Vec<UserId>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT user_id FROM email_mappings WHERE email = ?")?;
@@ -91,7 +90,7 @@ impl Storage {
         Ok(result)
     }
 
-    pub(crate) fn find_emails_for(&self, id: UserId) -> FailureOr<Vec<Email>> {
+    pub(crate) fn find_emails_for(&self, id: UserId) -> Result<Vec<Email>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT email FROM email_mappings WHERE user_id = ?")?;
@@ -111,7 +110,7 @@ impl Storage {
         Ok(result)
     }
 
-    pub(crate) fn remove_userid_mapping(&self, id: UserId, email: &Email) -> FailureOr<bool> {
+    pub(crate) fn remove_userid_mapping(&self, id: UserId, email: &Email) -> Result<bool> {
         let num_deleted = self.conn.execute(
             "DELETE FROM email_mappings WHERE user_id = ? AND email = ?",
             params![userid_to_db(id), email.address()],

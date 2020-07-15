@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use log::{error, info, warn};
 use tokio::sync::watch;
 
@@ -11,8 +12,6 @@ mod discord;
 mod greendragon;
 mod lab;
 mod storage;
-
-type FailureOr<T> = Result<T, failure::Error>;
 
 type BuildNumber = u32;
 
@@ -105,6 +104,7 @@ struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
 }
 
+// FIXME: Swap to anyhow's context
 #[macro_export]
 macro_rules! try_with_context {
     ($x:expr, $s:expr, $($xs:expr),*) => {{
@@ -116,7 +116,7 @@ macro_rules! try_with_context {
 
                 use std::fmt::Write;
                 msg.write_fmt(format_args!("{}", x)).unwrap();
-                let x: failure::Error = x.into();
+                let x: anyhow::Error = x.into();
                 return Err(x.context(msg).into());
             }
         }
@@ -236,7 +236,7 @@ async fn publish_forever(
     }
 }
 
-fn main() -> FailureOr<()> {
+fn main() -> Result<()> {
     simple_logger::init_with_level(log::Level::Info).unwrap();
     let matches = clap::App::new("llvm_buildbot_monitor")
         .arg(

@@ -10,9 +10,9 @@ opt-level = 2
 panic = "abort"
 
 [dependencies]
+anyhow = "1.0"
 chrono = "0.4"
 clap = "2.33"
-failure = "0.1"
 futures = "0.3"
 git-version = "0.3"
 lazy_static = "1.4"

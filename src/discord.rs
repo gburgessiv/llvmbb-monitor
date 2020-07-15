@@ -5,7 +5,6 @@ use crate::BotStatusSnapshot;
 use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
-use crate::FailureOr;
 use crate::Master;
 
 use std::borrow::{Borrow, Cow};
@@ -15,6 +14,7 @@ use std::fmt::Write;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use anyhow::Result;
 use log::{error, info, warn};
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::http::Http;
@@ -263,7 +263,7 @@ impl BlamelistCache {
         blamelist: &[Email],
         guild: GuildId,
         storage: &Mutex<Storage>,
-    ) -> FailureOr<()> {
+    ) -> Result<()> {
         if blamelist.is_empty() {
             return Ok(());
         }
@@ -373,7 +373,7 @@ impl ChannelServer {
         http: &Http,
         messages: &[S],
         existing_messages: &mut Vec<ServerUIMessage>,
-    ) -> FailureOr<()>
+    ) -> Result<()>
     where
         S: Borrow<str>,
     {
@@ -416,7 +416,7 @@ impl ChannelServer {
         Ok(())
     }
 
-    fn update_updates_channel(&mut self, http: &Http) -> FailureOr<()> {
+    fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
@@ -477,7 +477,7 @@ impl ChannelServer {
         http: &Http,
         ui: &mut UIBroadcastReceiver,
         should_exit: &mut F,
-    ) -> FailureOr<()>
+    ) -> Result<()>
     where
         F: FnMut() -> bool,
     {
@@ -1357,7 +1357,7 @@ pub(crate) fn run(
     snapshots: watch::Receiver<Option<Arc<BotStatusSnapshot>>>,
     runtime: Runtime,
     storage: Storage,
-) -> FailureOr<()> {
+) -> Result<()> {
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
     runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
     let handler = MessageHandler {

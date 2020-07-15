@@ -6,13 +6,13 @@ use crate::BuildbotResult;
 use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
-use crate::FailureOr;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::iter::Fuse;
+use std::result;
 
-use failure::bail;
+use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use serde::Deserialize;
@@ -41,7 +41,7 @@ impl<'de> serde::de::Visitor<'de> for BuilderStateVisitor {
         )
     }
 
-    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    fn visit_str<E>(self, s: &str) -> result::Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
@@ -56,7 +56,7 @@ impl<'de> serde::de::Visitor<'de> for BuilderStateVisitor {
 }
 
 impl<'de> Deserialize<'de> for BuilderState {
-    fn deserialize<D>(deserializer: D) -> Result<BuilderState, D::Error>
+    fn deserialize<D>(deserializer: D) -> result::Result<BuilderState, D::Error>
     where
         D: serde::de::Deserializer<'de>,
     {
@@ -93,7 +93,7 @@ impl UnabridgedBuilderStatus {
 struct RawBuildbotResult(i64);
 
 impl RawBuildbotResult {
-    fn as_buildbot_result(self) -> FailureOr<BuildbotResult> {
+    fn as_buildbot_result(self) -> Result<BuildbotResult> {
         match self.0 {
             0 => Ok(BuildbotResult::Success),
             1 => Ok(BuildbotResult::Warnings),
@@ -112,7 +112,7 @@ impl RawBuildbotResult {
 struct RawBuildbotTime(f64);
 
 impl RawBuildbotTime {
-    fn as_datetime(self) -> FailureOr<chrono::NaiveDateTime> {
+    fn as_datetime(self) -> Result<chrono::NaiveDateTime> {
         let secs = self.0 as i64;
         let nanos = ((self.0 - secs as f64) * 1_000_000_000f64) as u32;
         match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
@@ -145,7 +145,7 @@ fn remove_name_from_email(email: &str) -> &str {
 }
 
 impl UnabridgedBuildStatus {
-    fn into_completed_build(self) -> FailureOr<CompletedBuild> {
+    fn into_completed_build(self) -> Result<CompletedBuild> {
         let status = match self.results {
             Some(x) => x.as_buildbot_result()?,
             None => bail!("no `results` field available"),
@@ -183,7 +183,7 @@ lazy_static! {
         reqwest::Url::parse("http://lab.llvm.org:8011").expect("parsing lab URL");
 }
 
-async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
+async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -202,7 +202,7 @@ where
 
 async fn fetch_full_builder_status(
     client: &reqwest::Client,
-) -> FailureOr<HashMap<String, UnabridgedBuilderStatus>> {
+) -> Result<HashMap<String, UnabridgedBuilderStatus>> {
     Ok(json_get(client, "/json/builders").await?)
 }
 
@@ -210,7 +210,7 @@ async fn fetch_build_statuses(
     client: &reqwest::Client,
     builder: &str,
     numbers: &[BuildNumber],
-) -> FailureOr<Vec<UnabridgedBuildStatus>> {
+) -> Result<Vec<UnabridgedBuildStatus>> {
     if numbers.is_empty() {
         return Ok(Vec::new());
     }
@@ -271,7 +271,7 @@ where
         }
     }
 
-    async fn fill_cache_stack(&mut self) -> FailureOr<Option<usize>> {
+    async fn fill_cache_stack(&mut self) -> Result<Option<usize>> {
         assert!(self.cache_stack.is_empty());
 
         // Arbitrary limits that Should Be Good Enough.
@@ -309,7 +309,7 @@ where
         Ok(Some(to_fetch.len()))
     }
 
-    async fn next(&mut self) -> FailureOr<Option<CompletedBuild>> {
+    async fn next(&mut self) -> Result<Option<CompletedBuild>> {
         loop {
             if let Some(x) = self.cache_stack.pop() {
                 return Ok(Some(x));
@@ -331,7 +331,7 @@ async fn update_bot_status_with_cached_builds(
     builder: &str,
     status: &UnabridgedBuilderStatus,
     previous: &BotStatus,
-) -> FailureOr<BotStatus> {
+) -> Result<BotStatus> {
     let new_builds: Vec<BuildNumber> = {
         let mut all_builds = status.completed_builds_ascending();
         all_builds.retain(|x| *x > previous.most_recent_build.id);
@@ -382,7 +382,7 @@ async fn fetch_new_bot_status(
     client: &reqwest::Client,
     builder: &str,
     status: &UnabridgedBuilderStatus,
-) -> FailureOr<Option<BotStatus>> {
+) -> Result<Option<BotStatus>> {
     // Fetching incrementally is helpful above, but some bots are broken pretty often upstream.
     // Grabbing their status one by one can take forever, which slows down startup quite a bit (and
     // probs places a lot of undue load on the server), so we fetch them all.
@@ -422,7 +422,7 @@ async fn fetch_new_bot_status(
 pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
-) -> FailureOr<HashMap<String, Bot>> {
+) -> Result<HashMap<String, Bot>> {
     let bot_statuses = fetch_full_builder_status(client).await?;
 
     let mut new_bots: HashMap<String, Bot> = HashMap::new();

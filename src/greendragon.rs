@@ -6,12 +6,12 @@ use crate::BuildbotResult;
 use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
-use crate::FailureOr;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::result;
 
-use failure::bail;
+use anyhow::{bail, Result};
 use lazy_static::lazy_static;
 use log::{error, info, warn};
 use serde::Deserialize;
@@ -27,7 +27,7 @@ lazy_static! {
         reqwest::Url::parse("http://green.lab.llvm.org").expect("parsing greendragon URL");
 }
 
-async fn json_get<T>(client: &reqwest::Client, path: &str) -> FailureOr<T>
+async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -82,7 +82,7 @@ impl<'de> serde::de::Visitor<'de> for ColorVisitor {
         )
     }
 
-    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    fn visit_str<E>(self, s: &str) -> result::Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
@@ -97,7 +97,7 @@ impl<'de> serde::de::Visitor<'de> for ColorVisitor {
 }
 
 impl<'de> Deserialize<'de> for Color {
-    fn deserialize<D>(deserializer: D) -> Result<Color, D::Error>
+    fn deserialize<D>(deserializer: D) -> result::Result<Color, D::Error>
     where
         D: serde::de::Deserializer<'de>,
     {
@@ -127,7 +127,7 @@ async fn find_first_failing_build(
     build_list: &[RawStatusBuild],
     last_successful: Option<BuildNumber>,
     last_failure: BuildNumber,
-) -> FailureOr<CompletedBuild> {
+) -> Result<CompletedBuild> {
     debug_assert!(build_list.is_sorted_by_key(|x| x.number));
 
     let search_start: usize = if let Some(s) = last_successful {
@@ -143,7 +143,7 @@ async fn find_first_failing_build(
     for build_number in build_list[search_start..].iter().map(|x| x.number) {
         match fetch_completed_build(client, bot_name, build_number).await {
             Err(x) => {
-                let root_cause = x.find_root_cause();
+                let root_cause = x.root_cause();
                 if let Some(x) = root_cause.downcast_ref::<reqwest::Error>() {
                     if x.status() == Some(reqwest::StatusCode::NOT_FOUND) {
                         info!(
@@ -206,7 +206,7 @@ async fn fetch_single_bot_status_snapshot(
     prev: Option<&Bot>,
     name: &str,
     color: Color,
-) -> FailureOr<Option<Bot>> {
+) -> Result<Option<Bot>> {
     let status: RawBotStatus = {
         let mut status: RawBotStatus =
             json_get(client, &format!("/green/view/All/job/{}/api/json", name)).await?;
@@ -306,7 +306,7 @@ async fn fetch_single_bot_status_snapshot(
 pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
     prev: &HashMap<String, Bot>,
-) -> FailureOr<HashMap<String, Bot>> {
+) -> Result<HashMap<String, Bot>> {
     let mut result = HashMap::new();
 
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
@@ -339,7 +339,7 @@ enum RawBuildResult {
 }
 
 impl<'de> Deserialize<'de> for RawBuildResult {
-    fn deserialize<D>(deserializer: D) -> Result<RawBuildResult, D::Error>
+    fn deserialize<D>(deserializer: D) -> result::Result<RawBuildResult, D::Error>
     where
         D: serde::de::Deserializer<'de>,
     {
@@ -352,7 +352,7 @@ impl<'de> Deserialize<'de> for RawBuildResult {
                 write!(f, "either SUCCESS, FAILURE, or ABORTED")
             }
 
-            fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+            fn visit_str<E>(self, s: &str) -> result::Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
@@ -375,7 +375,7 @@ impl<'de> Deserialize<'de> for RawBuildResult {
 struct RawBuildbotTime(f64);
 
 impl RawBuildbotTime {
-    fn as_datetime(self) -> FailureOr<chrono::NaiveDateTime> {
+    fn as_datetime(self) -> Result<chrono::NaiveDateTime> {
         let millis = self.0 as i64;
         let secs = millis / 1000;
         let nanos = ((millis % 1000) * 1_000_000) as u32;
@@ -415,7 +415,7 @@ async fn fetch_completed_build(
     client: &reqwest::Client,
     bot_name: &str,
     id: BuildNumber,
-) -> FailureOr<CompletedBuild> {
+) -> Result<CompletedBuild> {
     let data: BuildResult =
         json_get(client, &format!("green/job/{}/{}/api/json", bot_name, id)).await?;
 
