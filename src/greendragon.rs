@@ -1,4 +1,3 @@
-use crate::try_with_context;
 use crate::Bot;
 use crate::BotStatus;
 use crate::BuildNumber;
@@ -11,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::result;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use lazy_static::lazy_static;
 use log::{error, info, warn};
 use serde::Deserialize;
@@ -31,17 +30,17 @@ async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let resp = try_with_context!(
-        client
-            .get(HOST.join(path)?)
-            .send()
-            .await
-            .and_then(|x| x.error_for_status()),
-        "requesting {}",
-        path
-    );
+    let resp = client
+        .get(HOST.join(path)?)
+        .send()
+        .await
+        .and_then(|x| x.error_for_status())
+        .with_context(|| format!("requesting {}", path))?;
 
-    Ok(try_with_context!(resp.json().await, "parsing {}", path))
+    Ok(resp
+        .json()
+        .await
+        .with_context(|| format!("parsing {}", path))?)
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]

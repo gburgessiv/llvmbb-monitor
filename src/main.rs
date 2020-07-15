@@ -104,25 +104,6 @@ struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
 }
 
-// FIXME: Swap to anyhow's context
-#[macro_export]
-macro_rules! try_with_context {
-    ($x:expr, $s:expr, $($xs:expr),*) => {{
-        match $x {
-            Ok(y) => y,
-            Err(x) => {
-                let mut msg = format!($s, $($xs),*);
-                msg += ": ";
-
-                use std::fmt::Write;
-                msg.write_fmt(format_args!("{}", x)).unwrap();
-                let x: anyhow::Error = x.into();
-                return Err(x.context(msg).into());
-            }
-        }
-    }}
-}
-
 fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
     let (mut tx, rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
