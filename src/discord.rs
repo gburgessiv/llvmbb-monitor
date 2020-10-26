@@ -2,7 +2,6 @@ use crate::storage::Storage;
 use crate::Bot;
 use crate::BotID;
 use crate::BotStatusSnapshot;
-use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
 use crate::Master;
@@ -1034,7 +1033,7 @@ impl StatusUIUpdater {
         let mut categories: HashMap<&'a str, HashMap<&'a BotID, &'a Bot>> = HashMap::new();
         let mut skipped = 0usize;
         for (name, bot) in &snapshot.bots {
-            if bot.status.state == BuilderState::Offline {
+            if !bot.status.is_online {
                 skipped += 1;
                 continue;
             }

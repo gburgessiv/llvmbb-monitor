@@ -15,13 +15,6 @@ mod storage;
 
 type BuildNumber = u32;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BuilderState {
-    Building,
-    Idle,
-    Offline,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum BuildbotResult {
     Success,
@@ -78,7 +71,7 @@ struct BotStatus {
     // If the most_recent_build is red, this'll be the first build we know of that failed.
     first_failing_build: Option<CompletedBuild>,
     most_recent_build: CompletedBuild,
-    state: BuilderState,
+    is_online: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -218,7 +211,7 @@ async fn publish_forever(
 }
 
 fn main() -> Result<()> {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
+    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).init().unwrap();
     let matches = clap::App::new("llvm_buildbot_monitor")
         .arg(
             clap::Arg::with_name("discord_token")
@@ -241,7 +234,7 @@ fn main() -> Result<()> {
         // for anybody.
         .timeout(Duration::from_secs(60))
         // Don't slam greendragon, either.
-        .max_idle_per_host(3)
+        .pool_max_idle_per_host(3)
         .build()?;
     let storage = storage::Storage::from_file(&database_file)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;

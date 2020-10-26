@@ -2,7 +2,6 @@ use crate::Bot;
 use crate::BotStatus;
 use crate::BuildNumber;
 use crate::BuildbotResult;
-use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
 
@@ -281,22 +280,9 @@ async fn fetch_single_bot_status_snapshot(
         status: BotStatus {
             first_failing_build,
             most_recent_build,
-            state: match color {
-                Color::Disabled => BuilderState::Offline,
-                Color::Red { flashing } => {
-                    if flashing {
-                        BuilderState::Building
-                    } else {
-                        BuilderState::Idle
-                    }
-                }
-                Color::Blue { flashing } => {
-                    if flashing {
-                        BuilderState::Building
-                    } else {
-                        BuilderState::Idle
-                    }
-                }
+            is_online: match color {
+                Color::Disabled => false,
+                Color::Red { .. } | Color::Blue { .. } => true,
             },
         },
     }))

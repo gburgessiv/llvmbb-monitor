@@ -2,7 +2,6 @@ use crate::Bot;
 use crate::BotStatus;
 use crate::BuildNumber;
 use crate::BuildbotResult;
-use crate::BuilderState;
 use crate::CompletedBuild;
 use crate::Email;
 
@@ -17,6 +16,22 @@ use log::{debug, error, warn};
 use serde::Deserialize;
 
 struct BuilderStateVisitor;
+
+#[derive(Copy, Clone, Debug)]
+enum BuilderState {
+    Building,
+    Idle,
+    Offline,
+}
+
+impl BuilderState {
+    fn is_online(&self) -> bool {
+        match self {
+            BuilderState::Building | BuilderState::Idle => true,
+            BuilderState::Offline => false,
+        }
+    }
+}
 
 fn valid_builder_state_values() -> &'static [(&'static str, BuilderState)] {
     &[
@@ -348,7 +363,7 @@ async fn update_bot_status_with_cached_builds(
         return Ok(BotStatus {
             first_failing_build: None,
             most_recent_build: newest_build,
-            state: status.state,
+            is_online: status.state.is_online(),
         });
     }
 
@@ -373,7 +388,7 @@ async fn update_bot_status_with_cached_builds(
     Ok(BotStatus {
         first_failing_build: Some(first_failing_build),
         most_recent_build: newest_build,
-        state: status.state,
+        is_online: status.state.is_online(),
     })
 }
 
@@ -399,7 +414,7 @@ async fn fetch_new_bot_status(
         return Ok(Some(BotStatus {
             first_failing_build: None,
             most_recent_build: newest_build,
-            state: status.state,
+            is_online: status.state.is_online(),
         }));
     }
 
@@ -414,7 +429,7 @@ async fn fetch_new_bot_status(
     Ok(Some(BotStatus {
         first_failing_build: Some(prev_build),
         most_recent_build: newest_build,
-        state: status.state,
+        is_online: status.state.is_online(),
     }))
 }
 
