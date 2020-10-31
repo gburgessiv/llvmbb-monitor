@@ -6,151 +6,418 @@ use crate::CompletedBuild;
 use crate::Email;
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::iter::Fuse;
-use std::result;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use lazy_static::lazy_static;
-use log::{debug, error, warn};
+use log::{debug, info, warn};
 use serde::Deserialize;
 
-struct BuilderStateVisitor;
+type LabBotID = u32;
 
+pub(crate) const MAX_CONCURRENCY: usize = 4;
+
+lazy_static! {
+    static ref HOST: reqwest::Url =
+        reqwest::Url::parse("http://lab.llvm.org:8011/api/v2/").expect("parsing lab URL");
+}
+
+async fn json_get_api<T>(client: &reqwest::Client, url: reqwest::Url) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let url_str = format!("{}", url);
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .and_then(|x| x.error_for_status())
+        .with_context(|| format!("requesting {:?}", url_str))?;
+
+    Ok(resp
+        .json()
+        .await
+        .with_context(|| format!("parsing {:?}", url_str))?)
+}
+
+fn is_successful_status(s: BuildbotResult) -> bool {
+    s == BuildbotResult::Success || s == BuildbotResult::Warnings
+}
+
+/// Okay, starting from nothing:
+///
+/// Need to produce a HashMap<StringBotName, Bot>
+/// Bots are:
+/// - a State (building, idle, offline)
+/// - a MostRecentBuild (CompletedBuild)
+/// - a FirstFailingBuild (CompletedBuild)
+///
+/// The idea is:
+/// - grab the most recent build request ID, then track that for incremental updates (that has
+///   {builderid, buildsetid, buildrequestid} triples)
+/// - on the first sync, find the most recent builds for each builder, then the first failing for
+///   each.
+/// - after that, look at BuildRequestIDs that were accepted & pending
+///
+/// ^^ that said, builds that are _chronologically_ sequenced after one another (in source sets)
+/// can complete out-of-order. that's going to require extra bookkeeping.
+
+#[derive(Debug, Deserialize)]
+struct BuilderInfo {
+    #[serde(rename = "builderid")]
+    id: LabBotID,
+    name: String,
+}
+
+async fn fetch_builder_infos(client: &reqwest::Client) -> Result<Vec<BuilderInfo>> {
+    #[derive(Deserialize)]
+    struct BuildersResult {
+        builders: Vec<BuilderInfo>,
+    }
+    Ok(
+        json_get_api::<BuildersResult>(client, HOST.join("builders")?)
+            .await?
+            .builders,
+    )
+}
+
+// http://docs.buildbot.net/current/developer/results.html#build-result-codes
 #[derive(Copy, Clone, Debug)]
-enum BuilderState {
-    Building,
-    Idle,
-    Offline,
-}
+struct RawBuildbotResult(BuildbotResult);
 
-impl BuilderState {
-    fn is_online(&self) -> bool {
-        match self {
-            BuilderState::Building | BuilderState::Idle => true,
-            BuilderState::Offline => false,
-        }
-    }
-}
-
-fn valid_builder_state_values() -> &'static [(&'static str, BuilderState)] {
-    &[
-        ("building", BuilderState::Building),
-        ("idle", BuilderState::Idle),
-        ("offline", BuilderState::Offline),
-    ]
-}
-
-impl<'de> serde::de::Visitor<'de> for BuilderStateVisitor {
-    type Value = BuilderState;
-
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "one of {:?}",
-            valid_builder_state_values()
-                .iter()
-                .map(|x| x.0)
-                .collect::<Vec<&'static str>>()
-        )
-    }
-
-    fn visit_str<E>(self, s: &str) -> result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        for (name, res) in valid_builder_state_values() {
-            if *name == s {
-                return Ok(*res);
-            }
-        }
-
-        Err(E::custom(format!("{:?} isn't a valid builder state", s)))
-    }
-}
-
-impl<'de> Deserialize<'de> for BuilderState {
-    fn deserialize<D>(deserializer: D) -> result::Result<BuilderState, D::Error>
+impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
+    fn deserialize<D>(deserializer: D) -> Result<RawBuildbotResult, D::Error>
     where
         D: serde::de::Deserializer<'de>,
     {
-        deserializer.deserialize_str(BuilderStateVisitor)
+        struct Visitor;
+
+        impl<'de2> serde::de::Visitor<'de2> for Visitor {
+            type Value = RawBuildbotResult;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an integer between [0,6]")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                use std::convert::TryInto;
+                match value.try_into() {
+                    Ok(x) => self.visit_i64(x),
+                    Err(_) => Err(E::custom(format!(
+                        "{} is an invalid buildbot result",
+                        value
+                    ))),
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    0 => Ok(RawBuildbotResult(BuildbotResult::Success)),
+                    1 => Ok(RawBuildbotResult(BuildbotResult::Warnings)),
+                    2 => Ok(RawBuildbotResult(BuildbotResult::Failure)),
+                    3 => Ok(RawBuildbotResult(BuildbotResult::Skipped)),
+                    4 => Ok(RawBuildbotResult(BuildbotResult::Exception)),
+                    // 5 is technically 'RETRY'. For our purposes, that's an exception.
+                    5 => Ok(RawBuildbotResult(BuildbotResult::Exception)),
+                    // 6 is technically 'CANCELLED'. For our purposes, that's an exception.
+                    6 => Ok(RawBuildbotResult(BuildbotResult::Exception)),
+                    n => Err(E::custom(format!("{} is an invalid buildbot result", n))),
+                }
+            }
+        }
+        deserializer.deserialize_i64(Visitor)
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UnabridgedBuilderStatus {
-    category: String,
-    cached_builds: Vec<BuildNumber>,
-    #[serde(default)]
-    current_builds: Vec<BuildNumber>,
-    state: BuilderState,
+#[derive(Copy, Clone, Debug)]
+struct RawBuildbotTime(chrono::NaiveDateTime);
+
+impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
+    fn deserialize<D>(deserializer: D) -> Result<RawBuildbotTime, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de2> serde::de::Visitor<'de2> for Visitor {
+            type Value = RawBuildbotTime;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a floating-point number representing a time")
+            }
+
+            fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let secs = value as i64;
+                let nanos = ((value - secs as f64) * 1_000_000_000f64) as u32;
+                match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
+                    Some(x) => Ok(RawBuildbotTime(x)),
+                    None => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                }
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                use std::convert::TryInto;
+                match value.try_into() {
+                    Ok(x) => self.visit_i64(x),
+                    Err(_) => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let secs = value as i64;
+                match chrono::NaiveDateTime::from_timestamp_opt(secs, 0) {
+                    Some(x) => Ok(RawBuildbotTime(x)),
+                    None => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                }
+            }
+        }
+        deserializer.deserialize_f64(Visitor)
+    }
 }
 
-impl UnabridgedBuilderStatus {
-    fn completed_builds_ascending(&self) -> Vec<BuildNumber> {
-        let running: HashSet<BuildNumber> = self.current_builds.iter().copied().collect();
-        let mut result: Vec<BuildNumber> = self
-            .cached_builds
-            .iter()
-            .copied()
-            .filter(|x| !running.contains(x))
+#[derive(Debug, Clone)]
+struct CompletedLabBuild {
+    builder_id: LabBotID,
+    build_id: BuildNumber,
+    complete_at: chrono::NaiveDateTime,
+    result: BuildbotResult,
+}
+
+#[derive(Debug, Clone)]
+struct BuilderBuildInfo {
+    most_recent_build: CompletedLabBuild,
+    first_failing_build: Option<CompletedLabBuild>,
+    // A list of pending builds that were _encountered_ in finding the first failing build. If lots
+    // of builds are in progress, this might not be a complete listing.
+    pending_builds: Vec<BuildNumber>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UnabridgedLabBuild {
+    #[serde(rename = "builderid")]
+    builder_id: LabBotID,
+    #[serde(rename = "buildid")]
+    build_id: BuildNumber,
+    // If not specified, the build isn't done.
+    #[serde(rename = "results", default)]
+    result: Option<RawBuildbotResult>,
+    // If not specified, the build isn't done.
+    #[serde(default)]
+    complete_at: Option<RawBuildbotTime>,
+}
+
+impl UnabridgedLabBuild {
+    fn to_completed_build(&self) -> Option<CompletedLabBuild> {
+        if let (Some(complete_at), Some(result)) = (self.complete_at, self.result) {
+            Some(CompletedLabBuild {
+                builder_id: self.builder_id,
+                build_id: self.build_id,
+                complete_at: complete_at.0,
+                result: result.0,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UnabridgedLabBuildListing {
+    builds: Vec<UnabridgedLabBuild>,
+}
+
+async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
+    client: T,
+    builder_id: LabBotID,
+) -> Result<Option<BuilderBuildInfo>> {
+    let fetch_amount = 25;
+    // If we have to go more than this many builds back, really, we're done.
+    let max_fetch = 500usize;
+    let mut best_result: Option<(CompletedLabBuild, CompletedLabBuild)> = None;
+
+    let fetch_amount_str = fetch_amount.to_string();
+    let mut pending_builds = Vec::new();
+    for start in (0..max_fetch).step_by(fetch_amount) {
+        let mut query_url = HOST.join(&format!("builders/{}/builds", builder_id))?;
+        query_url
+            .query_pairs_mut()
+            .clear()
+            .append_pair("order", "-buildid")
+            .append_pair("limit", &fetch_amount_str)
+            .append_pair("offset", &start.to_string());
+
+        let results = json_get_api::<UnabridgedLabBuildListing>(client.borrow(), query_url)
+            .await?
+            .builds;
+        if results.is_empty() {
+            break;
+        }
+
+        // Races: UnabridgedLabBuilds are assumed to be immutable once their result/complete_at
+        // fields are set. We only examine UnabridgedLabBuilds that have those set. If, by
+        // happenstance, one or more builds get added during our search, that's OK: we'll just
+        // rescan old ones and re-discard them as we've done previously.
+        let host_returned_fewer_builds_than_requested = results.len() < fetch_amount;
+        let completed_results: Vec<_> = results
+            .into_iter()
+            .filter_map(|x| {
+                if let Some(c) = x.to_completed_build() {
+                    Some(c)
+                } else {
+                    pending_builds.push(x.build_id);
+                    None
+                }
+            })
             .collect();
-        result.sort();
-        result
-    }
-}
 
-#[derive(Copy, Clone, Debug, Default, Deserialize)]
-#[serde(transparent)]
-struct RawBuildbotResult(i64);
+        let newest_success = completed_results
+            .iter()
+            .enumerate()
+            .find(|(_, x)| is_successful_status(x.result));
+        match newest_success {
+            Some((i, _)) => match best_result {
+                None => {
+                    if i == 0 {
+                        return Ok(Some(BuilderBuildInfo {
+                            most_recent_build: completed_results[0].clone(),
+                            first_failing_build: None,
+                            pending_builds,
+                        }));
+                    }
+                    return Ok(Some(BuilderBuildInfo {
+                        most_recent_build: completed_results[0].clone(),
+                        first_failing_build: Some(completed_results[i - 1].clone()),
+                        pending_builds,
+                    }));
+                }
+                Some((first_failing_build, most_recent_build)) => {
+                    return Ok(Some(BuilderBuildInfo {
+                        most_recent_build,
+                        first_failing_build: Some(
+                            completed_results
+                                .get(i - 1)
+                                .unwrap_or(&first_failing_build)
+                                .clone(),
+                        ),
+                        pending_builds,
+                    }));
+                }
+            },
+            None if completed_results.is_empty() => (),
+            None => {
+                let most_recent_build = completed_results.first().unwrap().clone();
+                let first_failing_build = completed_results.last().unwrap().clone();
+                best_result = Some((first_failing_build, most_recent_build));
+            }
+        }
 
-impl RawBuildbotResult {
-    fn as_buildbot_result(self) -> Result<BuildbotResult> {
-        match self.0 {
-            0 => Ok(BuildbotResult::Success),
-            1 => Ok(BuildbotResult::Warnings),
-            2 => Ok(BuildbotResult::Failure),
-            3 => Ok(BuildbotResult::Skipped),
-            4 => Ok(BuildbotResult::Exception),
-            // 5 is technically 'RETRY'. For our purposes, that's an exception.
-            5 => Ok(BuildbotResult::Exception),
-            n => bail!("{} is an invalid buildbot result", n),
+        // If we got fewer builds than we requested, we're out.
+        if host_returned_fewer_builds_than_requested {
+            break;
         }
     }
-}
 
-#[derive(Copy, Clone, Debug, Deserialize)]
-#[serde(transparent)]
-struct RawBuildbotTime(f64);
-
-impl RawBuildbotTime {
-    fn as_datetime(self) -> Result<chrono::NaiveDateTime> {
-        let secs = self.0 as i64;
-        let nanos = ((self.0 - secs as f64) * 1_000_000_000f64) as u32;
-        match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
-            Some(x) => Ok(x),
-            None => bail!("invalid timestamp: {}", self.0),
-        }
+    match best_result {
+        Some((first_failing_build, most_recent_build)) => Ok(Some(BuilderBuildInfo {
+            most_recent_build,
+            first_failing_build: Some(first_failing_build),
+            pending_builds,
+        })),
+        None => Ok(None),
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UnabridgedBuildStatus {
-    blame: Vec<String>,
-    builder_name: String,
-    number: BuildNumber,
-    // This may be either omitted (unsure why) or null (buildbot was killed in the middle of a
-    // build).
-    #[serde(default)]
-    results: Option<RawBuildbotResult>,
-    times: (RawBuildbotTime, Option<RawBuildbotTime>),
+async fn concurrent_map_early_exit<
+    A: Send + Sync + 'static,
+    T: Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<T>> + Send,
+    Run: Fn(A) -> Fut + 'static + Send + Sync,
+    IterA: std::iter::IntoIterator<Item = A>,
+>(
+    jobs: usize,
+    items: IterA,
+    run: Run,
+) -> Result<Vec<T>> {
+    assert_ne!(jobs, 0);
+
+    let (num_requests, request_stack) = {
+        let mut x: Vec<(usize, A)> = items.into_iter().enumerate().collect();
+        // Micro-opt: we do a lot of work below for nothing if nothing's here.
+        if x.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        x.reverse();
+        (x.len(), Arc::new(Mutex::new(x)))
+    };
+
+    let (resp_send, mut resp_recv) = tokio::sync::mpsc::channel::<(usize, Result<T>)>(jobs);
+    let jobs = std::cmp::min(num_requests, jobs);
+    let run = Arc::new(run);
+    let join_handles: Vec<_> = (0..jobs)
+        .map(|_| {
+            let request_stack = request_stack.clone();
+            let mut resp_send = resp_send.clone();
+            let run = run.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (index, arg) = match request_stack.lock().unwrap().pop() {
+                        Some(x) => x,
+                        None => return,
+                    };
+
+                    // The other side wants to shut down.
+                    if let Err(_) = resp_send.send((index, run(arg).await)).await {
+                        return;
+                    }
+                }
+            })
+        })
+        .collect();
+    std::mem::drop(resp_send);
+
+    let mut results = Vec::with_capacity(num_requests);
+    for _ in 0..num_requests {
+        results.push(None);
+    }
+
+    while let Some((index, x)) = resp_recv.recv().await {
+        match x {
+            Err(x) => {
+                std::mem::drop(resp_recv);
+                for h in join_handles {
+                    let _ = h.await;
+                }
+                return Err(x);
+            }
+            Ok(x) => results[index] = Some(x),
+        }
+    }
+
+    let results = results.into_iter().map(|x| x.unwrap()).collect();
+    for h in join_handles {
+        let _ = h.await;
+    }
+    Ok(results)
 }
 
-// "Foo Bar <foo@bar.com>" => "foo@bar.com"
-// Otherwise, returns the original email unaltered.
+/// "Foo Bar <foo@bar.com>" => "foo@bar.com"
+/// Otherwise, returns the original string unaltered.
 fn remove_name_from_email(email: &str) -> &str {
     match (email.rfind('<'), email.rfind('>')) {
         (Some(x), Some(y)) if x < y => &email[x + 1..y],
@@ -158,313 +425,391 @@ fn remove_name_from_email(email: &str) -> &str {
     }
 }
 
-impl UnabridgedBuildStatus {
-    fn into_completed_build(self) -> Result<CompletedBuild> {
-        let status = match self.results {
-            Some(x) => x.as_buildbot_result()?,
-            None => bail!("no `results` field available"),
-        };
+async fn fetch_build_blamelist(
+    client: &reqwest::Client,
+    build_id: BuildNumber,
+) -> Result<Vec<Email>> {
+    #[derive(Debug, Deserialize)]
+    struct UnabridgedChange {
+        author: String,
+    }
 
-        let completion_time: chrono::NaiveDateTime = match self.times.1 {
-            Some(x) => x.as_datetime()?,
-            None => bail!("build has not yet completed"),
-        };
+    #[derive(Debug, Deserialize)]
+    struct UnabridgedChangesListing {
+        changes: Vec<UnabridgedChange>,
+    }
 
-        let mut blamelist: Vec<Email> = Vec::with_capacity(self.blame.len());
-        for email in self.blame {
-            let email = remove_name_from_email(&email);
-            match Email::parse(email) {
-                Some(x) => blamelist.push(x),
-                None => warn!(
-                    "Failed parsing email {} for {}/{} (completed at {})",
-                    email, self.builder_name, self.number, completion_time
-                ),
-            }
-        }
+    let query_url = HOST.join(&format!("builds/{}/changes", build_id))?;
+    let results = json_get_api::<UnabridgedChangesListing>(client, query_url)
+        .await?
+        .changes;
 
-        blamelist.sort();
-        Ok(CompletedBuild {
-            id: self.number,
-            status,
-            completion_time,
-            blamelist,
+    results
+        .into_iter()
+        .map(|x| {
+            Email::parse(remove_name_from_email(&x.author))
+                .ok_or_else(|| anyhow!("failed parsing email: {:?}", x))
         })
-    }
+        .collect()
 }
 
-lazy_static! {
-    static ref HOST: reqwest::Url =
-        reqwest::Url::parse("http://lab.llvm.org:8011").expect("parsing lab URL");
-}
-
-async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let resp = client
-        .get(HOST.join(path)?)
-        .send()
-        .await
-        .and_then(|x| x.error_for_status())
-        .with_context(|| format!("requesting {}", path))?;
-
-    Ok(resp
-        .json()
-        .await
-        .with_context(|| format!("parsing {}", path))?)
-}
-
-async fn fetch_full_builder_status(
-    client: &reqwest::Client,
-) -> Result<HashMap<String, UnabridgedBuilderStatus>> {
-    Ok(json_get(client, "/json/builders").await?)
-}
-
-async fn fetch_build_statuses(
-    client: &reqwest::Client,
-    builder: &str,
-    numbers: &[BuildNumber],
-) -> Result<Vec<UnabridgedBuildStatus>> {
-    if numbers.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut url = format!("/json/builders/{}/builds?", builder);
-    use std::fmt::Write;
-    for (i, n) in numbers.iter().enumerate() {
-        if i != 0 {
-            url.push('&');
-        }
-        write!(url, "select={}", n).unwrap();
-    }
-
-    let mut results: HashMap<String, UnabridgedBuildStatus> = json_get(client, &url).await?;
-    let mut ordered_results: Vec<UnabridgedBuildStatus> = Vec::with_capacity(numbers.len());
-    for number in numbers {
-        match results.remove(&format!("{}", number)) {
-            Some(x) => ordered_results.push(x),
-            None => {
-                let unique_numbers: HashSet<BuildNumber> = numbers.iter().copied().collect();
-                if unique_numbers.len() != numbers.len() {
-                    bail!("duplicate build numbers requested: {:?}", numbers);
-                }
-                bail!("endpoint failed to return a build for {}", number);
-            }
-        }
-    }
-
-    Ok(ordered_results)
-}
-
-struct BuildStream<'a, Iter>
-where
-    Iter: Iterator<Item = BuildNumber>,
-{
-    builder_name: &'a str,
-    client: &'a reqwest::Client,
-    ids: Fuse<Iter>,
-
-    // We batch requests behind the scenes. Most requests only get the first few builds, but can
-    // walk back potentially for > 50.
-    cache_stack: Vec<CompletedBuild>,
-    num_fetched: usize,
-}
-
-impl<'a, Iter> BuildStream<'a, Iter>
-where
-    Iter: Iterator<Item = BuildNumber>,
-{
-    fn new(builder_name: &'a str, client: &'a reqwest::Client, ids: Iter) -> Self {
-        Self {
-            builder_name,
-            client,
-            ids: ids.fuse(),
-
-            cache_stack: Vec::new(),
-            num_fetched: 0,
-        }
-    }
-
-    async fn fill_cache_stack(&mut self) -> Result<Option<usize>> {
-        assert!(self.cache_stack.is_empty());
-
-        // Arbitrary limits that Should Be Good Enough.
-        let num_to_fetch = if self.num_fetched == 0 {
-            2
-        } else {
-            std::cmp::min(self.num_fetched * 2, 16)
-        };
-
-        let to_fetch: Vec<BuildNumber> = (&mut self.ids).take(num_to_fetch).collect();
-        if to_fetch.is_empty() {
-            return Ok(None);
-        }
-
-        self.num_fetched += to_fetch.len();
-        debug!("Fetching builds {}/{:?}", self.builder_name, to_fetch);
-
-        for status in fetch_build_statuses(self.client, self.builder_name, &to_fetch).await? {
-            let id = status.number;
-            match status.into_completed_build() {
-                Ok(a) => {
-                    self.cache_stack.push(a);
-                }
-                Err(x) => {
-                    error!(
-                        "Failed decoding build result for {}/{}: {}",
-                        self.builder_name, id, x
-                    );
-                }
-            }
-        }
-
-        // next() pops from the back.
-        self.cache_stack.reverse();
-        Ok(Some(to_fetch.len()))
-    }
-
-    async fn next(&mut self) -> Result<Option<CompletedBuild>> {
-        loop {
-            if let Some(x) = self.cache_stack.pop() {
-                return Ok(Some(x));
-            }
-
-            if self.fill_cache_stack().await?.is_none() {
-                return Ok(None);
-            }
-        }
-    }
-}
-
-// Skipping unparseable builds adds some really awkward (e.g., broken) properties here, but the
-// hope is that those builds will be super rare, and we should _try_ to make progress even in the
-// face of those, rather than falling over forever.
-
-async fn update_bot_status_with_cached_builds(
-    client: &reqwest::Client,
-    builder: &str,
-    status: &UnabridgedBuilderStatus,
-    previous: &BotStatus,
-) -> Result<BotStatus> {
-    let new_builds: Vec<BuildNumber> = {
-        let mut all_builds = status.completed_builds_ascending();
-        all_builds.retain(|x| *x > previous.most_recent_build.id);
-        all_builds
-    };
-
-    let mut build_stream = BuildStream::new(builder, client, new_builds.into_iter().rev());
-    let newest_build = match build_stream.next().await? {
-        None => return Ok(previous.clone()),
-        Some(x) => x,
-    };
-
-    let is_successful_status = |s| s == BuildbotResult::Success || s == BuildbotResult::Warnings;
-    if is_successful_status(newest_build.status) {
-        return Ok(BotStatus {
-            first_failing_build: None,
-            most_recent_build: newest_build,
-            is_online: status.state.is_online(),
-        });
-    }
-
-    let mut prev_build = newest_build.clone();
-    let mut found_success = false;
-    while let Some(build) = build_stream.next().await? {
-        if is_successful_status(build.status) {
-            found_success = true;
-            break;
-        }
-        prev_build = build;
-    }
-
-    let first_failing_build = if found_success {
-        prev_build
-    } else if let Some(ref b) = previous.first_failing_build {
-        b.clone()
-    } else {
-        prev_build
-    };
-
-    Ok(BotStatus {
-        first_failing_build: Some(first_failing_build),
-        most_recent_build: newest_build,
-        is_online: status.state.is_online(),
+async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
+    client: T,
+    build: &CompletedLabBuild,
+) -> Result<CompletedBuild> {
+    let blamelist = fetch_build_blamelist(client.borrow(), build.build_id).await?;
+    Ok(CompletedBuild {
+        id: build.build_id,
+        status: build.result,
+        completion_time: build.complete_at,
+        blamelist,
     })
 }
 
-async fn fetch_new_bot_status(
+async fn resolve_builder_build_info(
     client: &reqwest::Client,
-    builder: &str,
-    status: &UnabridgedBuilderStatus,
-) -> Result<Option<BotStatus>> {
-    // Fetching incrementally is helpful above, but some bots are broken pretty often upstream.
-    // Grabbing their status one by one can take forever, which slows down startup quite a bit (and
-    // probs places a lot of undue load on the server), so we fetch them all.
+    info: &BuilderBuildInfo,
+) -> Result<Bot> {
+    let most_recent_build = resolve_completed_lab_build(client, &info.most_recent_build).await?;
+    let first_failing_build = match &info.first_failing_build {
+        None => None,
+        Some(x) => Some(resolve_completed_lab_build(client, &x).await?),
+    };
+    Ok(Bot {
+        category: "FIXME".into(), // FIXME
+        status: BotStatus {
+            first_failing_build,
+            most_recent_build,
+            is_online: true, // FIXME:
+        },
+    })
+}
 
-    // impl Iterator<Item = CompletedBuild>
-    let new_builds = status.completed_builds_ascending();
-    let mut build_stream = BuildStream::new(builder, client, new_builds.into_iter().rev());
-    let newest_build = match build_stream.next().await? {
-        None => return Ok(None),
-        Some(x) => x,
+async fn perform_initial_builder_sync(
+    client: &reqwest::Client,
+) -> Result<(LabState, HashMap<String, Bot>)> {
+    let builder_infos = fetch_builder_infos(client).await?;
+    debug!("There appear to be {} builders", builder_infos.len());
+
+    let actual_builds = {
+        let client = client.clone();
+        concurrent_map_early_exit(
+            MAX_CONCURRENCY,
+            builder_infos.iter().map(|x| x.id),
+            move |builder_id: LabBotID| {
+                let client = client.clone();
+                info!("Fetching builder info for {}", builder_id);
+                async move {
+                    fetch_builder_build_info(client, builder_id)
+                        .await
+                        .with_context(|| format!("fetching builder {} status", builder_id))
+                }
+            },
+        )
+        .await?
     };
 
-    let is_successful_status = |s| s == BuildbotResult::Success || s == BuildbotResult::Warnings;
-    if is_successful_status(newest_build.status) {
-        return Ok(Some(BotStatus {
-            first_failing_build: None,
-            most_recent_build: newest_build,
-            is_online: status.state.is_online(),
-        }));
-    }
+    // FIXME: Should be harvesting from builder_infos instead of clone()ing
+    let id_to_name_map: HashMap<LabBotID, String> = builder_infos
+        .iter()
+        .map(|x| (x.id, x.name.clone()))
+        .collect();
 
-    let mut prev_build = newest_build.clone();
-    while let Some(build) = build_stream.next().await? {
-        if is_successful_status(build.status) {
-            break;
+    let mut pending_builds = Vec::new();
+    for x in &actual_builds {
+        if let Some(x) = x {
+            pending_builds.extend(&x.pending_builds);
         }
-        prev_build = build;
     }
 
-    Ok(Some(BotStatus {
-        first_failing_build: Some(prev_build),
-        most_recent_build: newest_build,
-        is_online: status.state.is_online(),
-    }))
+    let resolved_builds = {
+        let client = client.clone();
+        concurrent_map_early_exit(
+            MAX_CONCURRENCY,
+            builder_infos
+                .into_iter()
+                .map(|x| x.id)
+                .zip(actual_builds.into_iter())
+                .filter_map(|(bot_id, status)| match status {
+                    None => {
+                        info!(
+                            "Dropping {:?}; it has no builds",
+                            id_to_name_map.get(&bot_id).unwrap()
+                        );
+                        None
+                    }
+                    Some(x) => Some((bot_id, x)),
+                }),
+            move |(bot_id, actual_build)| {
+                let client = client.clone();
+                async move {
+                    Ok((
+                        bot_id,
+                        resolve_builder_build_info(&client, &actual_build).await?,
+                    ))
+                }
+            },
+        )
+        .await?
+    };
+
+    let most_recent_build = resolved_builds
+        .iter()
+        .map(|(_, bot)| bot.status.most_recent_build.id)
+        .max()
+        .ok_or_else(|| anyhow!("no builds found"))?;
+
+    let result_map = resolved_builds
+        .into_iter()
+        .map(|(bot_id, bot)| (id_to_name_map.get(&bot_id).unwrap().to_string(), bot))
+        .collect();
+
+    let lab_state = LabState {
+        most_recent_build,
+        pending_builds,
+        id_to_name_map,
+    };
+    Ok((lab_state, result_map))
+}
+
+pub(crate) struct LabState {
+    most_recent_build: BuildNumber,
+    pending_builds: Vec<BuildNumber>,
+    id_to_name_map: HashMap<LabBotID, String>,
+}
+
+// Fetches all builds, stopping _fetching_ once it encounters `stop_at`. Importantly, it may hand
+// back _more results older than stop_at_.
+async fn fetch_latest_build_statuses(
+    client: &reqwest::Client,
+    stop_at: BuildNumber,
+) -> Result<Vec<UnabridgedLabBuild>> {
+    #[derive(Deserialize, Debug)]
+    struct BuildsResult {
+        builds: Vec<UnabridgedLabBuild>,
+    }
+
+    let mut results = Vec::new();
+    // We have 100ish builders; 300 should generally allow us to fetch everything we care about in
+    // one try.
+    let fetch_amount = 300;
+    let fetch_amount_str = fetch_amount.to_string();
+    for start in (0usize..).step_by(fetch_amount) {
+        let mut query_url = HOST.join("builds")?;
+        query_url
+            .query_pairs_mut()
+            .clear()
+            .append_pair("order", "-buildid")
+            .append_pair("limit", &fetch_amount_str)
+            .append_pair("offset", &start.to_string());
+
+        let page = json_get_api::<BuildsResult>(client, HOST.join("builders")?)
+            .await?
+            .builds;
+
+        let stop = page.len() < fetch_amount || page.iter().any(|x| x.build_id <= stop_at);
+        results.extend(page.into_iter());
+        if stop {
+            return Ok(results);
+        }
+    }
+
+    unreachable!();
+}
+
+async fn fetch_build_by_id(
+    client: reqwest::Client,
+    number: BuildNumber,
+) -> Result<UnabridgedLabBuild> {
+    Ok(
+        json_get_api::<UnabridgedLabBuild>(&client, HOST.join(&format!("builds/{}", number))?)
+            .await?,
+    )
+}
+
+async fn perform_incremental_builder_sync(
+    client: &reqwest::Client,
+    prev_state: &LabState,
+    prev_result: &HashMap<String, Bot>,
+) -> Result<(LabState, HashMap<String, Bot>)> {
+    let build_status_snapshot =
+        fetch_latest_build_statuses(client, prev_state.most_recent_build).await?;
+
+    let most_recent_build = build_status_snapshot
+        .iter()
+        .map(|x| x.build_id)
+        .max()
+        .ok_or_else(|| anyhow!("no builds returned by builds/?"))?;
+
+    let missed_builds: Vec<UnabridgedLabBuild> = {
+        let fetched_ids: HashSet<BuildNumber> =
+            build_status_snapshot.iter().map(|x| x.build_id).collect();
+        let client = client.clone();
+        concurrent_map_early_exit(
+            MAX_CONCURRENCY,
+            prev_state
+                .pending_builds
+                .iter()
+                .cloned()
+                .filter(|x| !fetched_ids.contains(&x)),
+            move |id| fetch_build_by_id(client.clone(), id),
+        )
+        .await?
+    };
+
+    let previously_pending_builds: HashSet<BuildNumber> =
+        prev_state.pending_builds.iter().cloned().collect();
+    let mut pending_builds = Vec::new();
+
+    let completed_builds: Vec<CompletedLabBuild> = build_status_snapshot
+        .into_iter()
+        .chain(missed_builds.into_iter())
+        .filter_map(|build| {
+            if let Some(c) = build.to_completed_build() {
+                Some(c)
+            } else {
+                pending_builds.push(build.build_id);
+                None
+            }
+        })
+        .collect();
+
+    let resolved_newly_completed_builds: Vec<(LabBotID, CompletedBuild)> = {
+        let client = client.clone();
+        concurrent_map_early_exit(
+            MAX_CONCURRENCY,
+            completed_builds.into_iter().filter(|x| {
+                x.build_id > prev_state.most_recent_build
+                    || previously_pending_builds.contains(&x.build_id)
+            }),
+            move |build| {
+                let client = client.clone();
+                async move {
+                    let result = resolve_completed_lab_build(client, &build).await?;
+                    Ok((build.builder_id, result))
+                }
+            },
+        )
+        .await?
+    };
+
+    let mut new_results = HashMap::new();
+    let mut new_id_to_name_map = prev_state.id_to_name_map.clone();
+    {
+        let mut updated_name_map_once = false;
+        for (bot_id, build) in resolved_newly_completed_builds {
+            let name = match new_id_to_name_map.get(&bot_id) {
+                Some(x) => x,
+                None => {
+                    // Bot mutability is a really tricky subject: if a new bot appears under a
+                    // previously-used ID, we'd have to resync. Also, we can't ever detect that
+                    // 100% accurately, since there's a race for adding a bot between our "gimme
+                    // all of the recent builds" and "gimme all of the bots" requests.
+                    //
+                    // But just sorta hope that bots are only ever added under new IDs. If we
+                    // discover that an ID was overwritten _coincidentally_, we can recover from
+                    // it. but *bleh*.
+                    if updated_name_map_once {
+                        bail!("Name map required more than one update. _Something_ is wrong");
+                    }
+                    updated_name_map_once = true;
+                    warn!(
+                        "New builder with ID {:?} detected; resyncing from scratch.",
+                        bot_id
+                    );
+                    for builder in fetch_builder_infos(client).await? {
+                        if let Some(x) = new_id_to_name_map.get(&builder.id) {
+                            if &builder.name != x {
+                                warn!(
+                                    concat!(
+                                        "Conflict: previous builder state, for ID {:?}, had name ",
+                                        "{:?}. New has {:?}. Resyncing.",
+                                    ),
+                                    builder.id, x, builder.name,
+                                );
+                                return perform_initial_builder_sync(client).await;
+                            }
+                        } else {
+                            new_id_to_name_map.insert(builder.id, builder.name);
+                        }
+                    }
+
+                    new_id_to_name_map
+                        .get(&bot_id)
+                        .ok_or_else(|| anyhow!("bot ID {:?} unknown even after syncing?", bot_id))?
+                }
+            };
+
+            let new_state = match prev_result.get(name) {
+                Some(bot) => {
+                    // FIXME: It is. Theoretically possible for an old build for a bot to finish
+                    // before a new one. If there are multiple actual bots servicing the same
+                    // "bot". In that case... ugh. It doesn't _seem_ that we make use of this
+                    // flexibility at the moment, but our best bet is probably to delay
+                    // surfacing that a build finished until all builds before it are done.
+                    // Otherwise, we may blame the wrong set of people, and have all sorts of all
+                    // fun other effects downstream if a first_failing_build travels back in time.
+                    //
+                    // FIXME: is_online freshness?
+                    Bot {
+                        category: bot.category.clone(),
+                        status: BotStatus {
+                            first_failing_build: if is_successful_status(build.status) {
+                                None
+                            } else if let Some(x) = bot.status.first_failing_build.as_ref() {
+                                Some(x.clone())
+                            } else {
+                                Some(build.clone())
+                            },
+                            most_recent_build: build,
+                            is_online: true,
+                        },
+                    }
+                }
+                None => {
+                    warn!(
+                        "Previous state had no builds for {:?}; full-sync'ing it",
+                        name
+                    );
+                    match fetch_builder_build_info(client, bot_id).await? {
+                        Some(info) => resolve_builder_build_info(client, &info).await?,
+                        None => {
+                            warn!(
+                                "...Somehow, {:?} had no builds? Full syncing everything.",
+                                name
+                            );
+                            return perform_initial_builder_sync(client).await;
+                        }
+                    }
+                }
+            };
+            new_results.insert(name.clone(), new_state);
+        }
+    }
+
+    for (name, status) in prev_result {
+        if !new_results.contains_key(name) {
+            new_results.insert(name.to_string(), status.clone());
+        }
+    }
+
+    let new_lab_state = LabState {
+        most_recent_build,
+        pending_builds,
+        id_to_name_map: new_id_to_name_map,
+    };
+    Ok((new_lab_state, new_results))
 }
 
 pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
-    prev: &HashMap<String, Bot>,
+    lab_state: &mut Option<LabState>,
+    prev_result: &HashMap<String, Bot>,
 ) -> Result<HashMap<String, Bot>> {
-    let bot_statuses = fetch_full_builder_status(client).await?;
-
-    let mut new_bots: HashMap<String, Bot> = HashMap::new();
-    for (bot_name, status) in bot_statuses.into_iter() {
-        // This _could_ be done in independent tasks, but we only do a lot of queries and such on
-        // startup, and even that only takes ~20s to go through.
-        let new_status = if let Some(last_bot) = prev.get(&bot_name) {
-            update_bot_status_with_cached_builds(client, &bot_name, &status, &last_bot.status)
-                .await?
-        } else {
-            match fetch_new_bot_status(client, &bot_name, &status).await? {
-                // If the bot has no builds, it's effectively dead to us.
-                None => {
-                    debug!("Ignoring {:?}; it has no builds", bot_name);
-                    continue;
-                }
-                Some(x) => x,
-            }
-        };
-
-        new_bots.insert(
-            bot_name,
-            Bot {
-                category: status.category,
-                status: new_status,
-            },
-        );
-    }
-
-    Ok(new_bots)
+    let (new_state, results) = match lab_state {
+        None => perform_initial_builder_sync(client).await?,
+        Some(state) => perform_incremental_builder_sync(client, state, prev_result).await?,
+    };
+    *lab_state = Some(new_state);
+    Ok(results)
 }

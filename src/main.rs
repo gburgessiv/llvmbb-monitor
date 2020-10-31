@@ -121,6 +121,7 @@ async fn publish_forever(
     notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
 ) {
     let mut ticks = new_async_ticker(Duration::from_secs(60));
+    let mut lab_state = None;
     let mut last_lab_snapshot = HashMap::new();
     let mut last_greendragon_snapshot = HashMap::new();
     loop {
@@ -128,7 +129,7 @@ async fn publish_forever(
 
         let start_time = Instant::now();
         let (lab_update, greendragon_update) = futures::future::join(
-            lab::fetch_new_status_snapshot(&client, &last_lab_snapshot),
+            lab::fetch_new_status_snapshot(&client, &mut lab_state, &last_lab_snapshot),
             greendragon::fetch_new_status_snapshot(&client, &last_greendragon_snapshot),
         )
         .await;
@@ -233,8 +234,7 @@ fn main() -> Result<()> {
         // The lab can take a while to hand back results, but 60 seconds should be enough
         // for anybody.
         .timeout(Duration::from_secs(60))
-        // Don't slam greendragon, either.
-        .pool_max_idle_per_host(3)
+        .pool_max_idle_per_host(lab::MAX_CONCURRENCY)
         .build()?;
     let storage = storage::Storage::from_file(&database_file)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
