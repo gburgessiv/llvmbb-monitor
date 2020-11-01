@@ -4,7 +4,6 @@ use crate::BotID;
 use crate::BotStatusSnapshot;
 use crate::CompletedBuild;
 use crate::Email;
-use crate::Master;
 
 use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
@@ -421,18 +420,23 @@ impl ChannelServer {
             let mut current_message = String::with_capacity(256);
             current_message += "**New build breakage**: <";
 
-            let bot_name = url_escape_bot_name(&next_breakage.bot_id.name);
-            match next_breakage.bot_id.master {
-                Master::GreenDragon => write!(
+            match &next_breakage.bot_id {
+                BotID::GreenDragon { name } => write!(
                     current_message,
                     "http://green.lab.llvm.org/green/job/{}/{}/",
-                    bot_name, next_breakage.build.id
+                    url_escape_bot_name(name),
+                    next_breakage.build.id
                 ),
-                Master::Lab => write!(
-                    current_message,
-                    "http://lab.llvm.org:8011/builders/{}/builds/{}",
-                    bot_name, next_breakage.build.id
-                ),
+                BotID::Lab { id, .. } => {
+                    // As much as I'd prefer to use `name` instead of `id` here, buildbot doesn't
+                    // properly render `/#/builders/${bot_name}/builds/${build_id}`, so `${bot_id}`
+                    // it is...
+                    write!(
+                        current_message,
+                        "http://lab.llvm.org:8011/#/builders/{}/builds/{}",
+                        id, next_breakage.build.id
+                    )
+                }
             }
             .unwrap();
 
@@ -1214,9 +1218,9 @@ impl StatusUIUpdater {
                     ""
                 };
 
-                let url_prefix: &str = match bot_id.master {
-                    Master::GreenDragon => "http://green.lab.llvm.org/green/job",
-                    Master::Lab => "http://lab.llvm.org:8011/builders",
+                let (url_prefix, bot_name): (&str, &str) = match &bot_id {
+                    BotID::GreenDragon { name } => ("http://green.lab.llvm.org/green/job", name),
+                    BotID::Lab { name, .. } => ("http://lab.llvm.org:8011/#/builders", name),
                 };
 
                 write!(
@@ -1225,7 +1229,7 @@ impl StatusUIUpdater {
                     emoji,
                     time_broken_str,
                     url_prefix,
-                    url_escape_bot_name(&bot_id.name),
+                    url_escape_bot_name(bot_name),
                     first_failed_id,
                 )
                 .unwrap();

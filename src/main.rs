@@ -80,16 +80,10 @@ struct Bot {
     status: BotStatus,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash, Ord, PartialOrd)]
-enum Master {
-    Lab,
-    GreenDragon,
-}
-
 #[derive(Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
-struct BotID {
-    master: Master,
-    name: String,
+enum BotID {
+    Lab{id: lab::BotID, name: String},
+    GreenDragon{name: String},
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,10 +159,10 @@ async fn publish_forever(
 
         let this_snapshot: HashMap<BotID, Bot> = last_lab_snapshot
             .iter()
-            .map(|(name, bot)| {
+            .map(|(id, (name, bot))| {
                 (
-                    BotID {
-                        master: Master::Lab,
+                    BotID::Lab {
+                        id: *id,
                         name: name.clone(),
                     },
                     bot.clone(),
@@ -176,8 +170,7 @@ async fn publish_forever(
             })
             .chain(last_greendragon_snapshot.iter().map(|(name, bot)| {
                 (
-                    BotID {
-                        master: Master::GreenDragon,
+                    BotID::GreenDragon {
                         name: name.clone(),
                     },
                     bot.clone(),

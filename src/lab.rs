@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
 
-type LabBotID = u32;
+pub(crate) type BotID = u32;
 
 pub(crate) const MAX_CONCURRENCY: usize = 4;
 
@@ -65,15 +65,33 @@ fn is_successful_status(s: BuildbotResult) -> bool {
 #[derive(Debug, Deserialize)]
 struct BuilderInfo {
     #[serde(rename = "builderid")]
-    id: LabBotID,
+    id: BotID,
     name: String,
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct BuildersResult {
+    builders: Vec<BuilderInfo>,
+}
+
+async fn fetch_builder_info(client: &reqwest::Client, id: BotID) -> Result<BuilderInfo> {
+    let mut builders =
+        json_get_api::<BuildersResult>(client, HOST.join(&format!("builders/{}", id))?)
+            .await?
+            .builders;
+
+    if builders.len() != 1 {
+        bail!(
+            "bot ID {} matches {} bots; should match exactly 1",
+            id,
+            builders.len()
+        );
+    }
+    Ok(builders.pop().unwrap())
 }
 
 async fn fetch_builder_infos(client: &reqwest::Client) -> Result<Vec<BuilderInfo>> {
-    #[derive(Deserialize)]
-    struct BuildersResult {
-        builders: Vec<BuilderInfo>,
-    }
     Ok(
         json_get_api::<BuildersResult>(client, HOST.join("builders")?)
             .await?
@@ -192,7 +210,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
 
 #[derive(Debug, Clone)]
 struct CompletedLabBuild {
-    builder_id: LabBotID,
+    builder_id: BotID,
     build_id: BuildNumber,
     complete_at: chrono::NaiveDateTime,
     result: BuildbotResult,
@@ -210,7 +228,7 @@ struct BuilderBuildInfo {
 #[derive(Clone, Debug, Deserialize)]
 struct UnabridgedLabBuild {
     #[serde(rename = "builderid")]
-    builder_id: LabBotID,
+    builder_id: BotID,
     #[serde(rename = "buildid")]
     build_id: BuildNumber,
     // If not specified, the build isn't done.
@@ -243,7 +261,7 @@ struct UnabridgedLabBuildListing {
 
 async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
     client: T,
-    builder_id: LabBotID,
+    builder_id: BotID,
 ) -> Result<Option<BuilderBuildInfo>> {
     let fetch_amount = 25;
     // If we have to go more than this many builds back, really, we're done.
@@ -459,6 +477,10 @@ async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
 ) -> Result<CompletedBuild> {
     let blamelist = fetch_build_blamelist(client.borrow(), build.build_id).await?;
     Ok(CompletedBuild {
+        // FIXME: This ID is correct in a global sense, and will work in URLs, but it doesn't mesh
+        // up with buildbot's UI: this ID is globally unique, but builds displayed by _builders_
+        // have their own, builder-local ID. e.g., global ID 50000 might map to
+        // builders/foo/builds/123.
         id: build.build_id,
         status: build.result,
         completion_time: build.complete_at,
@@ -466,8 +488,71 @@ async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
     })
 }
 
+fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
+    // Bot categories are... interesting. Older verisons of the lab had exactly one category per
+    // bot, but newer versions only have the notion of tags, aaaand a single bot may have multiple
+    // tags.
+
+    // If there's precisely one tag though, we have a clear winner.
+    if bot_info.tags.len() == 1 {
+        return Some(&bot_info.tags[0]);
+    }
+
+    // Some bots have a `toolchain` tag on them, and their names are otherwise not possible to
+    // extract a category from. Prioritize that tag.
+    {
+        let toolchain_tag = "toolchain";
+        if bot_info.tags.iter().any(|x| x == toolchain_tag) {
+            return Some(toolchain_tag);
+        }
+    }
+
+    // Similarly, `clang-tools` bots break word splitting below, since we split on /[-_]/. If we
+    // find a clang-tools tag, that wins.
+    {
+        let clang_tools = "clang-tools";
+        if bot_info.tags.iter().any(|x| x == clang_tools) {
+            return Some(clang_tools);
+        }
+    }
+
+    // ...But if there's more than one tag, go hunting in the name. An approach that seemed
+    // reasonable at first was "hey, just take the first word of the bot's name." This works for
+    // most bots, but not others:
+    // - llvm-clang-foo-bar should be in "clang"
+    // - ppc64le-lld-foo-bar should be in "lld"
+    // - aosp-O3-polly-before-vectorizer-unprofitable should be in "polly"
+    // etc etc.
+    //
+    // So we split the name, looking for known categories in the split. If we find more than zero,
+    // we prioritize these categories based on a predetermined 'importance list', and return the
+    // winner. Directly below is said importance list. Ordering was intuit'ed by glancing at
+    // http://lab.llvm.org:8011/#/builders.
+    let known_categories = [
+        "clang",
+        "polly",
+        "flang",
+        "lld",
+        "libc",
+        "libcxx",
+        "libunwind",
+        "lldb",
+        "llvm",
+    ];
+
+    let best_index = bot_info
+        .name
+        .split(|c| c == '_' || c == '-')
+        .enumerate()
+        .filter(|(_, piece)| known_categories.iter().find(|x| x == &piece).is_some())
+        .map(|(index, _)| index)
+        .min();
+    best_index.map(|x| known_categories[x])
+}
+
 async fn resolve_builder_build_info(
     client: &reqwest::Client,
+    bot_info: &BuilderInfo,
     info: &BuilderBuildInfo,
 ) -> Result<Bot> {
     let most_recent_build = resolve_completed_lab_build(client, &info.most_recent_build).await?;
@@ -476,7 +561,9 @@ async fn resolve_builder_build_info(
         Some(x) => Some(resolve_completed_lab_build(client, &x).await?),
     };
     Ok(Bot {
-        category: "FIXME".into(), // FIXME
+        category: determine_bot_category(bot_info)
+            .unwrap_or(&bot_info.name)
+            .to_string(),
         status: BotStatus {
             first_failing_build,
             most_recent_build,
@@ -487,7 +574,7 @@ async fn resolve_builder_build_info(
 
 async fn perform_initial_builder_sync(
     client: &reqwest::Client,
-) -> Result<(LabState, HashMap<String, Bot>)> {
+) -> Result<(LabState, HashMap<BotID, (String, Bot)>)> {
     let builder_infos = fetch_builder_infos(client).await?;
     debug!("There appear to be {} builders", builder_infos.len());
 
@@ -496,7 +583,7 @@ async fn perform_initial_builder_sync(
         concurrent_map_early_exit(
             MAX_CONCURRENCY,
             builder_infos.iter().map(|x| x.id),
-            move |builder_id: LabBotID| {
+            move |builder_id: BotID| {
                 let client = client.clone();
                 info!("Fetching builder info for {}", builder_id);
                 async move {
@@ -509,12 +596,6 @@ async fn perform_initial_builder_sync(
         .await?
     };
 
-    // FIXME: Should be harvesting from builder_infos instead of clone()ing
-    let id_to_name_map: HashMap<LabBotID, String> = builder_infos
-        .iter()
-        .map(|x| (x.id, x.name.clone()))
-        .collect();
-
     let mut pending_builds = Vec::new();
     for x in &actual_builds {
         if let Some(x) = x {
@@ -522,31 +603,26 @@ async fn perform_initial_builder_sync(
         }
     }
 
-    let resolved_builds = {
+    let resolved_builds: Vec<(BotID, (String, Bot))> = {
         let client = client.clone();
         concurrent_map_early_exit(
             MAX_CONCURRENCY,
             builder_infos
                 .into_iter()
-                .map(|x| x.id)
                 .zip(actual_builds.into_iter())
-                .filter_map(|(bot_id, status)| match status {
+                .filter_map(|(bot_info, status)| match status {
                     None => {
-                        info!(
-                            "Dropping {:?}; it has no builds",
-                            id_to_name_map.get(&bot_id).unwrap()
-                        );
+                        info!("Dropping {:?}; it has no builds", bot_info.name);
                         None
                     }
-                    Some(x) => Some((bot_id, x)),
+                    Some(x) => Some((bot_info, x)),
                 }),
-            move |(bot_id, actual_build)| {
+            move |(bot_info, actual_build)| {
                 let client = client.clone();
                 async move {
-                    Ok((
-                        bot_id,
-                        resolve_builder_build_info(&client, &actual_build).await?,
-                    ))
+                    let result =
+                        resolve_builder_build_info(&client, &bot_info, &actual_build).await?;
+                    Ok((bot_info.id, (bot_info.name, result)))
                 }
             },
         )
@@ -555,27 +631,20 @@ async fn perform_initial_builder_sync(
 
     let most_recent_build = resolved_builds
         .iter()
-        .map(|(_, bot)| bot.status.most_recent_build.id)
+        .map(|(_, (_, bot))| bot.status.most_recent_build.id)
         .max()
         .ok_or_else(|| anyhow!("no builds found"))?;
-
-    let result_map = resolved_builds
-        .into_iter()
-        .map(|(bot_id, bot)| (id_to_name_map.get(&bot_id).unwrap().to_string(), bot))
-        .collect();
 
     let lab_state = LabState {
         most_recent_build,
         pending_builds,
-        id_to_name_map,
     };
-    Ok((lab_state, result_map))
+    Ok((lab_state, resolved_builds.into_iter().collect()))
 }
 
 pub(crate) struct LabState {
     most_recent_build: BuildNumber,
     pending_builds: Vec<BuildNumber>,
-    id_to_name_map: HashMap<LabBotID, String>,
 }
 
 // Fetches all builds, stopping _fetching_ once it encounters `stop_at`. Importantly, it may hand
@@ -603,7 +672,7 @@ async fn fetch_latest_build_statuses(
             .append_pair("limit", &fetch_amount_str)
             .append_pair("offset", &start.to_string());
 
-        let page = json_get_api::<BuildsResult>(client, HOST.join("builders")?)
+        let page = json_get_api::<BuildsResult>(client, query_url)
             .await?
             .builds;
 
@@ -630,8 +699,8 @@ async fn fetch_build_by_id(
 async fn perform_incremental_builder_sync(
     client: &reqwest::Client,
     prev_state: &LabState,
-    prev_result: &HashMap<String, Bot>,
-) -> Result<(LabState, HashMap<String, Bot>)> {
+    prev_result: &HashMap<BotID, (String, Bot)>,
+) -> Result<(LabState, HashMap<BotID, (String, Bot)>)> {
     let build_status_snapshot =
         fetch_latest_build_statuses(client, prev_state.most_recent_build).await?;
 
@@ -674,7 +743,7 @@ async fn perform_incremental_builder_sync(
         })
         .collect();
 
-    let resolved_newly_completed_builds: Vec<(LabBotID, CompletedBuild)> = {
+    let resolved_newly_completed_builds: Vec<(BotID, CompletedBuild)> = {
         let client = client.clone();
         concurrent_map_early_exit(
             MAX_CONCURRENCY,
@@ -694,63 +763,20 @@ async fn perform_incremental_builder_sync(
     };
 
     let mut new_results = HashMap::new();
-    let mut new_id_to_name_map = prev_state.id_to_name_map.clone();
-    {
-        let mut updated_name_map_once = false;
-        for (bot_id, build) in resolved_newly_completed_builds {
-            let name = match new_id_to_name_map.get(&bot_id) {
-                Some(x) => x,
-                None => {
-                    // Bot mutability is a really tricky subject: if a new bot appears under a
-                    // previously-used ID, we'd have to resync. Also, we can't ever detect that
-                    // 100% accurately, since there's a race for adding a bot between our "gimme
-                    // all of the recent builds" and "gimme all of the bots" requests.
-                    //
-                    // But just sorta hope that bots are only ever added under new IDs. If we
-                    // discover that an ID was overwritten _coincidentally_, we can recover from
-                    // it. but *bleh*.
-                    if updated_name_map_once {
-                        bail!("Name map required more than one update. _Something_ is wrong");
-                    }
-                    updated_name_map_once = true;
-                    warn!(
-                        "New builder with ID {:?} detected; resyncing from scratch.",
-                        bot_id
-                    );
-                    for builder in fetch_builder_infos(client).await? {
-                        if let Some(x) = new_id_to_name_map.get(&builder.id) {
-                            if &builder.name != x {
-                                warn!(
-                                    concat!(
-                                        "Conflict: previous builder state, for ID {:?}, had name ",
-                                        "{:?}. New has {:?}. Resyncing.",
-                                    ),
-                                    builder.id, x, builder.name,
-                                );
-                                return perform_initial_builder_sync(client).await;
-                            }
-                        } else {
-                            new_id_to_name_map.insert(builder.id, builder.name);
-                        }
-                    }
-
-                    new_id_to_name_map
-                        .get(&bot_id)
-                        .ok_or_else(|| anyhow!("bot ID {:?} unknown even after syncing?", bot_id))?
-                }
-            };
-
-            let new_state = match prev_result.get(name) {
-                Some(bot) => {
-                    // FIXME: It is. Theoretically possible for an old build for a bot to finish
-                    // before a new one. If there are multiple actual bots servicing the same
-                    // "bot". In that case... ugh. It doesn't _seem_ that we make use of this
-                    // flexibility at the moment, but our best bet is probably to delay
-                    // surfacing that a build finished until all builds before it are done.
-                    // Otherwise, we may blame the wrong set of people, and have all sorts of all
-                    // fun other effects downstream if a first_failing_build travels back in time.
-                    //
-                    // FIXME: is_online freshness?
+    for (bot_id, build) in resolved_newly_completed_builds {
+        let (name, new_state): (String, Bot) = match prev_result.get(&bot_id) {
+            Some((name, bot)) => {
+                // FIXME: It is. Theoretically possible for an old build for a bot to finish
+                // before a new one. If there are multiple actual bots servicing the same
+                // "bot". In that case... ugh. It doesn't _seem_ that we make use of this
+                // flexibility at the moment, but our best bet is probably to delay
+                // surfacing that a build finished until all builds before it are done.
+                // Otherwise, we may blame the wrong set of people, and have all sorts of all
+                // fun other effects downstream if a first_failing_build travels back in time.
+                //
+                // FIXME: is_online freshness?
+                (
+                    name.clone(),
                     Bot {
                         category: bot.category.clone(),
                         status: BotStatus {
@@ -764,39 +790,42 @@ async fn perform_incremental_builder_sync(
                             most_recent_build: build,
                             is_online: true,
                         },
+                    },
+                )
+            }
+            None => {
+                warn!(
+                    "Previous state had no builds for {:?}; full-sync'ing it",
+                    bot_id
+                );
+                let bot_info = fetch_builder_info(client, bot_id).await?;
+                let bot = match fetch_builder_build_info(client, bot_id).await? {
+                    Some(build_info) => {
+                        resolve_builder_build_info(client, &bot_info, &build_info).await?
                     }
-                }
-                None => {
-                    warn!(
-                        "Previous state had no builds for {:?}; full-sync'ing it",
-                        name
-                    );
-                    match fetch_builder_build_info(client, bot_id).await? {
-                        Some(info) => resolve_builder_build_info(client, &info).await?,
-                        None => {
-                            warn!(
-                                "...Somehow, {:?} had no builds? Full syncing everything.",
-                                name
-                            );
-                            return perform_initial_builder_sync(client).await;
-                        }
+                    None => {
+                        warn!(
+                            "...Somehow, {:?} had no builds? Full syncing everything.",
+                            bot_id
+                        );
+                        return perform_initial_builder_sync(client).await;
                     }
-                }
-            };
-            new_results.insert(name.clone(), new_state);
-        }
+                };
+                (bot_info.name, bot)
+            }
+        };
+        new_results.insert(bot_id, (name, new_state));
     }
 
-    for (name, status) in prev_result {
-        if !new_results.contains_key(name) {
-            new_results.insert(name.to_string(), status.clone());
+    for (id, status) in prev_result {
+        if !new_results.contains_key(id) {
+            new_results.insert(*id, status.clone());
         }
     }
 
     let new_lab_state = LabState {
         most_recent_build,
         pending_builds,
-        id_to_name_map: new_id_to_name_map,
     };
     Ok((new_lab_state, new_results))
 }
@@ -804,8 +833,8 @@ async fn perform_incremental_builder_sync(
 pub(crate) async fn fetch_new_status_snapshot(
     client: &reqwest::Client,
     lab_state: &mut Option<LabState>,
-    prev_result: &HashMap<String, Bot>,
-) -> Result<HashMap<String, Bot>> {
+    prev_result: &HashMap<BotID, (String, Bot)>,
+) -> Result<HashMap<BotID, (String, Bot)>> {
     let (new_state, results) = match lab_state {
         None => perform_initial_builder_sync(client).await?,
         Some(state) => perform_incremental_builder_sync(client, state, prev_result).await?,
