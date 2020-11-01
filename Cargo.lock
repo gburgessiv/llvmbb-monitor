@@ -659,6 +659,7 @@ dependencies = [
  "clap",
  "futures",
  "git-version",
+ "hyper",
  "lazy_static",
  "log",
  "reqwest",

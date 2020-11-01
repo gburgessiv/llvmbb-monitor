@@ -22,22 +22,57 @@ lazy_static! {
         reqwest::Url::parse("http://lab.llvm.org:8011/api/v2/").expect("parsing lab URL");
 }
 
-async fn json_get_api<T>(client: &reqwest::Client, url: reqwest::Url) -> Result<T>
+fn is_incomplete_message_error(e: &reqwest::Error) -> bool {
+    use std::error::Error;
+    if let Some(e) = e.source() {
+        if let Some(e) = e.downcast_ref::<hyper::Error>() {
+            return e.is_incomplete_message();
+        }
+    }
+    false
+}
+
+async fn json_get_api<T>(client: &reqwest::Client, url: &reqwest::Url) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
+    let max_attempts = 5usize;
+    let mut attempt_number = 0usize;
     let url_str = format!("{}", url);
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .and_then(|x| x.error_for_status())
-        .with_context(|| format!("requesting {:?}", url_str))?;
+    loop {
+        let resp = match client
+            .get(url.clone())
+            .send()
+            .await
+            .and_then(|x| x.error_for_status())
+        {
+            Err(x) => {
+                // Occasionally, the lab will shut down idle connections. There's a race here
+                // between "the connection is closing" (which requires network packets to be
+                // shuffled around in order to complete) and "the application wants to send bits on
+                // the wire of this connection."
+                //
+                // Ultimately, there's no way to fix this, but retrying a few times should paper
+                // over it.
+                if attempt_number < max_attempts && is_incomplete_message_error(&x) {
+                    warn!(
+                        "Request to {:?} failed with IncompleteMessage; retrying",
+                        url_str
+                    );
+                    attempt_number += 1;
+                    continue;
+                }
 
-    Ok(resp
-        .json()
-        .await
-        .with_context(|| format!("parsing {:?}", url_str))?)
+                return Err(anyhow::Error::new(x).context(format!("requesting {:?}", url_str)));
+            }
+            Ok(x) => x,
+        };
+
+        return Ok(resp
+            .json()
+            .await
+            .with_context(|| format!("parsing {:?}", url_str))?);
+    }
 }
 
 fn is_successful_status(s: BuildbotResult) -> bool {
@@ -77,7 +112,7 @@ struct BuildersResult {
 
 async fn fetch_builder_info(client: &reqwest::Client, id: BotID) -> Result<BuilderInfo> {
     let mut builders =
-        json_get_api::<BuildersResult>(client, HOST.join(&format!("builders/{}", id))?)
+        json_get_api::<BuildersResult>(client, &HOST.join(&format!("builders/{}", id))?)
             .await?
             .builders;
 
@@ -93,7 +128,7 @@ async fn fetch_builder_info(client: &reqwest::Client, id: BotID) -> Result<Build
 
 async fn fetch_builder_infos(client: &reqwest::Client) -> Result<Vec<BuilderInfo>> {
     Ok(
-        json_get_api::<BuildersResult>(client, HOST.join("builders")?)
+        json_get_api::<BuildersResult>(client, &HOST.join("builders")?)
             .await?
             .builders,
     )
@@ -272,8 +307,8 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
 
     let fetch_amount_str = fetch_amount.to_string();
     let mut pending_builds = Vec::new();
+    let mut query_url = HOST.join(&format!("builders/{}/builds", builder_id))?;
     for start in (0..max_fetch).step_by(fetch_amount) {
-        let mut query_url = HOST.join(&format!("builders/{}/builds", builder_id))?;
         query_url
             .query_pairs_mut()
             .clear()
@@ -281,7 +316,7 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
             .append_pair("limit", &fetch_amount_str)
             .append_pair("offset", &start.to_string());
 
-        let results = json_get_api::<UnabridgedLabBuildListing>(client.borrow(), query_url)
+        let results = json_get_api::<UnabridgedLabBuildListing>(client.borrow(), &query_url)
             .await?
             .builds;
         if results.is_empty() {
@@ -460,7 +495,7 @@ async fn fetch_build_blamelist(
     }
 
     let query_url = HOST.join(&format!("builds/{}/changes", build_id))?;
-    let results = json_get_api::<UnabridgedChangesListing>(client, query_url)
+    let results = json_get_api::<UnabridgedChangesListing>(client, &query_url)
         .await?
         .changes;
 
@@ -680,8 +715,8 @@ async fn fetch_latest_build_statuses(
     // one try.
     let fetch_amount = 300;
     let fetch_amount_str = fetch_amount.to_string();
+    let mut query_url = HOST.join("builds")?;
     for start in (0usize..).step_by(fetch_amount) {
-        let mut query_url = HOST.join("builds")?;
         query_url
             .query_pairs_mut()
             .clear()
@@ -689,7 +724,7 @@ async fn fetch_latest_build_statuses(
             .append_pair("limit", &fetch_amount_str)
             .append_pair("offset", &start.to_string());
 
-        let page = json_get_api::<BuildsResult>(client, query_url)
+        let page = json_get_api::<BuildsResult>(client, &query_url)
             .await?
             .builds;
 
@@ -712,7 +747,7 @@ async fn fetch_build_by_id(
         builds: Vec<UnabridgedLabBuild>,
     }
 
-    let mut builds = json_get_api::<Builds>(&client, HOST.join(&format!("builds/{}", number))?)
+    let mut builds = json_get_api::<Builds>(&client, &HOST.join(&format!("builds/{}", number))?)
         .await?
         .builds;
     if builds.len() != 1 {
