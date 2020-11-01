@@ -135,7 +135,7 @@ async fn publish_forever(
                 update_success = true;
             }
             Err(x) => {
-                error!("Updating lab bot statuses failed: {}\n{}", x, x.backtrace());
+                error!("Updating lab bot statuses failed:\n{:?}", x);
             }
         }
 
@@ -145,11 +145,7 @@ async fn publish_forever(
                 update_success = true;
             }
             Err(x) => {
-                error!(
-                    "Updating greendragon bot statuses failed: {}\n{}",
-                    x,
-                    x.backtrace()
-                );
+                error!("Updating greendragon bot statuses failed:\n{:?}", x);
             }
         };
 
