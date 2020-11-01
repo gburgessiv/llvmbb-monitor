@@ -82,8 +82,8 @@ struct Bot {
 
 #[derive(Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
 enum BotID {
-    Lab{id: lab::BotID, name: String},
-    GreenDragon{name: String},
+    Lab { id: lab::BotID, name: String },
+    GreenDragon { name: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -168,14 +168,11 @@ async fn publish_forever(
                     bot.clone(),
                 )
             })
-            .chain(last_greendragon_snapshot.iter().map(|(name, bot)| {
-                (
-                    BotID::GreenDragon {
-                        name: name.clone(),
-                    },
-                    bot.clone(),
-                )
-            }))
+            .chain(
+                last_greendragon_snapshot
+                    .iter()
+                    .map(|(name, bot)| (BotID::GreenDragon { name: name.clone() }, bot.clone())),
+            )
             .collect();
 
         let elapsed_time = start_time.elapsed();
@@ -204,8 +201,17 @@ async fn publish_forever(
     }
 }
 
+fn init_logger_or_die() {
+    let mut logger = simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info);
+    // Hyper and reqwest give a loot of `DEBUG` information.
+    if cfg!(debug_assertions) {
+        logger = logger.with_module_level("llvm_buildbot_monitor", log::LevelFilter::Debug);
+    }
+    logger.init().unwrap();
+}
+
 fn main() -> Result<()> {
-    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info).init().unwrap();
+    init_logger_or_die();
     let matches = clap::App::new("llvm_buildbot_monitor")
         .arg(
             clap::Arg::with_name("discord_token")

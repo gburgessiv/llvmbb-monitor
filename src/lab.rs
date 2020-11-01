@@ -263,6 +263,8 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
     client: T,
     builder_id: BotID,
 ) -> Result<Option<BuilderBuildInfo>> {
+    debug!("Fetching builder info for {}", builder_id);
+
     let fetch_amount = 25;
     // If we have to go more than this many builds back, really, we're done.
     let max_fetch = 500usize;
@@ -544,9 +546,13 @@ fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
     let best_index = bot_info
         .name
         .split(|c| c == '_' || c == '-')
-        .enumerate()
-        .filter(|(_, piece)| known_categories.iter().find(|x| x == &piece).is_some())
-        .map(|(index, _)| index)
+        .filter_map(|piece| {
+            known_categories
+                .iter()
+                .enumerate()
+                .find(|(_, x)| **x == piece)
+                .map(|(index, _)| index)
+        })
         .min();
     best_index.map(|x| known_categories[x])
 }
@@ -576,8 +582,9 @@ async fn resolve_builder_build_info(
 async fn perform_initial_builder_sync(
     client: &reqwest::Client,
 ) -> Result<(LabState, HashMap<BotID, (String, Bot)>)> {
+    info!("Beginning full sync for the lab");
     let builder_infos = fetch_builder_infos(client).await?;
-    debug!("There appear to be {} builders", builder_infos.len());
+    info!("There appear to be {} builders", builder_infos.len());
 
     let actual_builds = {
         let client = client.clone();
@@ -586,7 +593,6 @@ async fn perform_initial_builder_sync(
             builder_infos.iter().map(|x| x.id),
             move |builder_id: BotID| {
                 let client = client.clone();
-                info!("Fetching builder info for {}", builder_id);
                 async move {
                     fetch_builder_build_info(client, builder_id)
                         .await
@@ -630,11 +636,21 @@ async fn perform_initial_builder_sync(
         .await?
     };
 
+    debug!("Loaded information for builders: {:?}", {
+        let mut x = resolved_builds
+            .iter()
+            .map(|(_, (name, _))| name)
+            .collect::<Vec<_>>();
+        x.sort();
+        x
+    });
+
     let most_recent_build = resolved_builds
         .iter()
         .map(|(_, (_, bot))| bot.status.most_recent_build.id)
         .max()
         .ok_or_else(|| anyhow!("no builds found"))?;
+    info!("Handing back info for {} builders", resolved_builds.len());
 
     let lab_state = LabState {
         most_recent_build,
@@ -691,10 +707,22 @@ async fn fetch_build_by_id(
     client: reqwest::Client,
     number: BuildNumber,
 ) -> Result<UnabridgedLabBuild> {
-    Ok(
-        json_get_api::<UnabridgedLabBuild>(&client, HOST.join(&format!("builds/{}", number))?)
-            .await?,
-    )
+    #[derive(Deserialize)]
+    struct Builds {
+        builds: Vec<UnabridgedLabBuild>,
+    }
+
+    let mut builds = json_get_api::<Builds>(&client, HOST.join(&format!("builds/{}", number))?)
+        .await?
+        .builds;
+    if builds.len() != 1 {
+        bail!(
+            "build ID {} matches {} builds; should match exactly 1",
+            number,
+            builds.len()
+        );
+    }
+    Ok(builds.pop().unwrap())
 }
 
 async fn perform_incremental_builder_sync(
@@ -800,6 +828,7 @@ async fn perform_incremental_builder_sync(
                     bot_id
                 );
                 let bot_info = fetch_builder_info(client, bot_id).await?;
+                warn!("Synced {:?}'s name == {:?}", bot_id, bot_info.name,);
                 let bot = match fetch_builder_build_info(client, bot_id).await? {
                     Some(build_info) => {
                         resolve_builder_build_info(client, &bot_info, &build_info).await?
@@ -842,4 +871,21 @@ pub(crate) async fn fetch_new_status_snapshot(
     };
     *lab_state = Some(new_state);
     Ok(results)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_category_determinations() {
+        assert_eq!(
+            Some("llvm"),
+            determine_bot_category(&BuilderInfo {
+                id: 123,
+                name: "llvm-sphinx-docs".to_string(),
+                tags: vec!["llvm".into(), "docs".into()],
+            })
+        );
+    }
 }
