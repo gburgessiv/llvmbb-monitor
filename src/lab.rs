@@ -538,6 +538,7 @@ fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
         "libunwind",
         "lldb",
         "llvm",
+        "rev_iter",
     ];
 
     let best_index = bot_info
