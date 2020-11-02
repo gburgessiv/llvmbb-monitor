@@ -714,13 +714,19 @@ async fn perform_initial_builder_sync(
     let lab_state = LabState {
         most_recent_build,
         pending_builds,
+        blocked_builds: Default::default(),
     };
     Ok((lab_state, resolved_builds.into_iter().collect()))
 }
 
 pub(crate) struct LabState {
+    // The most recent global build number we've seen.
     most_recent_build: GlobalBuildNumber,
+    // All builds that we've seen which are yet to finish.
     pending_builds: Vec<GlobalBuildNumber>,
+    // All builds which have completed, but which aren't allowed to be resolved/inspected yet
+    // because builds of older sources for the given bot haven't yet finished.
+    blocked_builds: HashMap<BotID, Vec<CompletedLabBuild>>,
 }
 
 // Fetches all builds, stopping _fetching_ once it encounters `stop_at`. Importantly, it may hand
@@ -819,29 +825,78 @@ async fn perform_incremental_builder_sync(
 
     let previously_pending_builds: HashSet<GlobalBuildNumber> =
         prev_state.pending_builds.iter().cloned().collect();
-    let mut pending_builds = Vec::new();
+    let mut pending_builds: HashMap<BotID, Vec<(LocalBuildNumber, GlobalBuildNumber)>> =
+        Default::default();
 
-    let completed_builds: Vec<CompletedLabBuild> = build_status_snapshot
+    let newly_completed_builds: Vec<CompletedLabBuild> = build_status_snapshot
         .into_iter()
         .chain(missed_builds.into_iter())
+        .filter(|x| {
+            x.build_id > prev_state.most_recent_build
+                || previously_pending_builds.contains(&x.build_id)
+        })
         .filter_map(|build| {
             if let Some(c) = build.to_completed_build() {
                 Some(c)
             } else {
-                pending_builds.push(build.build_id);
+                pending_builds
+                    .entry(build.builder_id)
+                    .or_default()
+                    .push((build.local_build_id, build.build_id));
                 None
             }
         })
+        // Because of the side-effect in filter_map, this has to be collected eagerly.
         .collect();
+
+    let mut publishable_completed_builds: Vec<CompletedLabBuild> = Default::default();
+    let mut new_blocked_builds = prev_state.blocked_builds.clone();
+
+    // FIXME: This is n^2 WRT the number of pending builds for each builder, but n is likely to be
+    // <10, so.
+    for build in newly_completed_builds {
+        let is_publishable = pending_builds
+            .get(&build.builder_id)
+            .map(|pending| {
+                pending
+                    .iter()
+                    .all(|(local_id, _)| build.local_build_id < *local_id)
+            })
+            .unwrap_or(true);
+
+        if !is_publishable {
+            new_blocked_builds
+                .entry(build.builder_id)
+                .or_default()
+                .push(build);
+            continue;
+        }
+
+        if let Some(blocked) = new_blocked_builds.remove(&build.builder_id) {
+            let mut new_blocked = Vec::new();
+            for x in blocked {
+                if x.local_build_id < build.local_build_id {
+                    publishable_completed_builds.push(x);
+                } else {
+                    new_blocked.push(x);
+                }
+            }
+            if !new_blocked.is_empty() {
+                new_blocked_builds.insert(build.builder_id, new_blocked);
+            }
+        }
+        publishable_completed_builds.push(build);
+    }
+
+    // For a given bot, we rely on earlier position in this vec == older sources in the build. We
+    // don't care about the order of unrelated bots' builds.
+    publishable_completed_builds.sort_by_key(|x| x.local_build_id);
 
     let resolved_newly_completed_builds: Vec<(BotID, CompletedBuild)> = {
         let client = client.clone();
         concurrent_map_early_exit(
             MAX_CONCURRENCY,
-            completed_builds.into_iter().filter(|x| {
-                x.build_id > prev_state.most_recent_build
-                    || previously_pending_builds.contains(&x.build_id)
-            }),
+            publishable_completed_builds,
             move |build| {
                 let client = client.clone();
                 async move {
@@ -855,31 +910,14 @@ async fn perform_incremental_builder_sync(
 
     let mut new_results = HashMap::new();
     for (bot_id, build) in resolved_newly_completed_builds {
-        let (name, new_state): (String, Bot) = match prev_result.get(&bot_id) {
+        // If we have multiple builds for the same bot in the same `newly_completed_builds` list,
+        // assume that the earlier buidls in `resolved_newly_completed_builds` were also earlier
+        // WRT the version of sources they were building.
+        let (name, new_state): (String, Bot) = match new_results
+            .get(&bot_id)
+            .or_else(|| prev_result.get(&bot_id))
+        {
             Some((name, bot)) => {
-                // FIXME: It is. Theoretically possible for an old build for a bot to finish
-                // before a new one. If there are multiple actual bots servicing the same
-                // "bot". In that case... ugh. It doesn't _seem_ that we make use of this
-                // flexibility at the moment, but our best bet is probably to delay
-                // surfacing that a build finished until all builds before it are done.
-                // Otherwise, we may blame the wrong set of people, and have all sorts of all
-                // fun other effects downstream if a first_failing_build travels back in time.
-                //
-                // ^^ OK, so it looks like that's actually a potential issue today:
-                // http://lab.llvm.org:8011/#/builders/sanitizer-x86_64-linux has two builds
-                // happening simultaneously on different bots. Idea is to make the assumptions
-                // that:
-                // - if a worker takes a build with the local ID N, and another worker under the
-                //   same builder takes a build with local ID > N, the second worker must be working
-                //   with newer sources than the first one, and
-                // - if a pending build exists with a local ID == N, and a pending build with local
-                //   M, where M < N, does not exist, then build M is finished.
-                //
-                // From there, just keep a cache of CompletedBuilds that're blocked from being
-                // 'published'/resolved by earlier pending builds. And visit
-                // resolved_newly_completed_builds in such a way that multiple builds for the same
-                // bot is considered OK...
-                //
                 // FIXME: is_online freshness?
                 (
                     name.clone(),
@@ -932,7 +970,16 @@ async fn perform_incremental_builder_sync(
 
     let new_lab_state = LabState {
         most_recent_build,
-        pending_builds,
+        pending_builds: {
+            let mut result = Vec::new();
+            for (_, builds) in pending_builds {
+                for (_, global_id) in builds {
+                    result.push(global_id);
+                }
+            }
+            result
+        },
+        blocked_builds: new_blocked_builds,
     };
     Ok((new_lab_state, new_results))
 }
