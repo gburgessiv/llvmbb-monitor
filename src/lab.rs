@@ -17,16 +17,54 @@ pub(crate) type BotID = u32;
 
 pub(crate) const MAX_CONCURRENCY: usize = 4;
 
+// Buildbot has two flavors of build IDs: build IDs _local to a bot_, and _globally unique_
+// build IDs. Represent those as distinct types, so they're difficult to inadvertently flip.
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
+#[serde(transparent)]
+struct GlobalBuildNumber(BuildNumber);
+
+impl GlobalBuildNumber {
+    fn as_global_crate_build_number(&self) -> BuildNumber {
+        self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
+#[serde(transparent)]
+struct LocalBuildNumber(BuildNumber);
+
+impl LocalBuildNumber {
+    fn as_local_crate_build_number(&self) -> BuildNumber {
+        self.0
+    }
+}
+
 lazy_static! {
     static ref HOST: reqwest::Url =
         reqwest::Url::parse("http://lab.llvm.org:8011/api/v2/").expect("parsing lab URL");
 }
 
+fn find_chained_error_of_type<Src: std::error::Error + 'static, E: std::error::Error + 'static>(
+    base: &E,
+) -> Option<&Src> {
+    let mut current: &dyn std::error::Error = base;
+    while let Some(e) = current.source() {
+        if let Some(x) = e.downcast_ref::<Src>() {
+            return Some(x);
+        }
+        current = e;
+    }
+    None
+}
+
 fn is_incomplete_message_error(e: &reqwest::Error) -> bool {
-    use std::error::Error;
-    if let Some(e) = e.source() {
-        if let Some(e) = e.downcast_ref::<hyper::Error>() {
-            return e.is_incomplete_message();
+    if let Some(e) = find_chained_error_of_type::<hyper::Error, _>(e) {
+        if e.is_incomplete_message() {
+            return true;
+        }
+
+        if let Some(e) = find_chained_error_of_type::<std::io::Error, _>(e) {
+            return e.kind() == std::io::ErrorKind::ConnectionReset;
         }
     }
     false
@@ -56,8 +94,8 @@ where
                 // over it.
                 if attempt_number < max_attempts && is_incomplete_message_error(&x) {
                     warn!(
-                        "Request to {:?} failed with IncompleteMessage; retrying",
-                        url_str
+                        "Request to {:?} failed due to apparent connection shutdown; retrying: {}",
+                        url_str, x,
                     );
                     attempt_number += 1;
                     continue;
@@ -246,7 +284,8 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
 #[derive(Debug, Clone)]
 struct CompletedLabBuild {
     builder_id: BotID,
-    build_id: BuildNumber,
+    build_id: GlobalBuildNumber,
+    local_build_id: LocalBuildNumber,
     complete_at: chrono::NaiveDateTime,
     result: BuildbotResult,
 }
@@ -257,7 +296,7 @@ struct BuilderBuildInfo {
     first_failing_build: Option<CompletedLabBuild>,
     // A list of pending builds that were _encountered_ in finding the first failing build. If lots
     // of builds are in progress, this might not be a complete listing.
-    pending_builds: Vec<BuildNumber>,
+    pending_builds: Vec<GlobalBuildNumber>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -265,7 +304,9 @@ struct UnabridgedLabBuild {
     #[serde(rename = "builderid")]
     builder_id: BotID,
     #[serde(rename = "buildid")]
-    build_id: BuildNumber,
+    build_id: GlobalBuildNumber,
+    #[serde(rename = "number")]
+    local_build_id: LocalBuildNumber,
     // If not specified, the build isn't done.
     #[serde(rename = "results", default)]
     result: Option<RawBuildbotResult>,
@@ -280,6 +321,7 @@ impl UnabridgedLabBuild {
             Some(CompletedLabBuild {
                 builder_id: self.builder_id,
                 build_id: self.build_id,
+                local_build_id: self.local_build_id,
                 complete_at: complete_at.0,
                 result: result.0,
             })
@@ -482,7 +524,7 @@ fn remove_name_from_email(email: &str) -> &str {
 
 async fn fetch_build_blamelist(
     client: &reqwest::Client,
-    build_id: BuildNumber,
+    build_id: GlobalBuildNumber,
 ) -> Result<Vec<Email>> {
     #[derive(Debug, Deserialize)]
     struct UnabridgedChange {
@@ -494,7 +536,10 @@ async fn fetch_build_blamelist(
         changes: Vec<UnabridgedChange>,
     }
 
-    let query_url = HOST.join(&format!("builds/{}/changes", build_id))?;
+    let query_url = HOST.join(&format!(
+        "builds/{}/changes",
+        build_id.as_global_crate_build_number()
+    ))?;
     let results = json_get_api::<UnabridgedChangesListing>(client, &query_url)
         .await?
         .changes;
@@ -514,11 +559,7 @@ async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
 ) -> Result<CompletedBuild> {
     let blamelist = fetch_build_blamelist(client.borrow(), build.build_id).await?;
     Ok(CompletedBuild {
-        // FIXME: This ID is correct in a global sense, and will work in URLs, but it doesn't mesh
-        // up with buildbot's UI: this ID is globally unique, but builds displayed by _builders_
-        // have their own, builder-local ID. e.g., global ID 50000 might map to
-        // builders/foo/builds/123.
-        id: build.build_id,
+        id: build.local_build_id.as_local_crate_build_number(),
         status: build.result,
         completion_time: build.complete_at,
         blamelist,
@@ -609,7 +650,7 @@ async fn resolve_builder_build_info(
         status: BotStatus {
             first_failing_build,
             most_recent_build,
-            is_online: true, // FIXME:
+            is_online: true, // FIXME: having an actual value for this would be nice...
         },
     })
 }
@@ -621,7 +662,7 @@ async fn perform_initial_builder_sync(
     let builder_infos = fetch_builder_infos(client).await?;
     info!("There appear to be {} builders", builder_infos.len());
 
-    let actual_builds = {
+    let actual_builds: Vec<Option<BuilderBuildInfo>> = {
         let client = client.clone();
         concurrent_map_early_exit(
             MAX_CONCURRENCY,
@@ -644,6 +685,12 @@ async fn perform_initial_builder_sync(
             pending_builds.extend(&x.pending_builds);
         }
     }
+
+    let most_recent_build = actual_builds
+        .iter()
+        .filter_map(|build| build.as_ref().map(|x| x.most_recent_build.build_id))
+        .max()
+        .ok_or_else(|| anyhow!("no builds found"))?;
 
     let resolved_builds: Vec<(BotID, (String, Bot))> = {
         let client = client.clone();
@@ -680,11 +727,6 @@ async fn perform_initial_builder_sync(
         x
     });
 
-    let most_recent_build = resolved_builds
-        .iter()
-        .map(|(_, (_, bot))| bot.status.most_recent_build.id)
-        .max()
-        .ok_or_else(|| anyhow!("no builds found"))?;
     info!("Handing back info for {} builders", resolved_builds.len());
 
     let lab_state = LabState {
@@ -695,15 +737,15 @@ async fn perform_initial_builder_sync(
 }
 
 pub(crate) struct LabState {
-    most_recent_build: BuildNumber,
-    pending_builds: Vec<BuildNumber>,
+    most_recent_build: GlobalBuildNumber,
+    pending_builds: Vec<GlobalBuildNumber>,
 }
 
 // Fetches all builds, stopping _fetching_ once it encounters `stop_at`. Importantly, it may hand
 // back _more results older than stop_at_.
 async fn fetch_latest_build_statuses(
     client: &reqwest::Client,
-    stop_at: BuildNumber,
+    stop_at: GlobalBuildNumber,
 ) -> Result<Vec<UnabridgedLabBuild>> {
     #[derive(Deserialize, Debug)]
     struct BuildsResult {
@@ -740,19 +782,22 @@ async fn fetch_latest_build_statuses(
 
 async fn fetch_build_by_id(
     client: reqwest::Client,
-    number: BuildNumber,
+    number: GlobalBuildNumber,
 ) -> Result<UnabridgedLabBuild> {
     #[derive(Deserialize)]
     struct Builds {
         builds: Vec<UnabridgedLabBuild>,
     }
 
-    let mut builds = json_get_api::<Builds>(&client, &HOST.join(&format!("builds/{}", number))?)
-        .await?
-        .builds;
+    let mut builds = json_get_api::<Builds>(
+        &client,
+        &HOST.join(&format!("builds/{}", number.as_global_crate_build_number()))?,
+    )
+    .await?
+    .builds;
     if builds.len() != 1 {
         bail!(
-            "build ID {} matches {} builds; should match exactly 1",
+            "build ID {:?} matches {} builds; should match exactly 1",
             number,
             builds.len()
         );
@@ -775,7 +820,7 @@ async fn perform_incremental_builder_sync(
         .ok_or_else(|| anyhow!("no builds returned by builds/?"))?;
 
     let missed_builds: Vec<UnabridgedLabBuild> = {
-        let fetched_ids: HashSet<BuildNumber> =
+        let fetched_ids: HashSet<GlobalBuildNumber> =
             build_status_snapshot.iter().map(|x| x.build_id).collect();
         let client = client.clone();
         concurrent_map_early_exit(
@@ -790,7 +835,7 @@ async fn perform_incremental_builder_sync(
         .await?
     };
 
-    let previously_pending_builds: HashSet<BuildNumber> =
+    let previously_pending_builds: HashSet<GlobalBuildNumber> =
         prev_state.pending_builds.iter().cloned().collect();
     let mut pending_builds = Vec::new();
 

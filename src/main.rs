@@ -13,6 +13,9 @@ mod greendragon;
 mod lab;
 mod storage;
 
+// A number used to identify a build. Note that this isn't expected to identify a single build for
+// a single source (e.g., lab or green dragon): the ones we get from lab uniquely identify a build
+// _per builder_, but multiple builders can totally have overlapping BuildNumbers.
 type BuildNumber = u32;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
