@@ -973,9 +973,7 @@ async fn perform_incremental_builder_sync(
         pending_builds: {
             let mut result = Vec::new();
             for (_, builds) in pending_builds {
-                for (_, global_id) in builds {
-                    result.push(global_id);
-                }
+                result.extend(builds.into_iter().map(|(_, global_id)| global_id));
             }
             result
         },
