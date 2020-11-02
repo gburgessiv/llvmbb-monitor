@@ -461,7 +461,7 @@ async fn concurrent_map_early_exit<
                     };
 
                     // The other side wants to shut down.
-                    if let Err(_) = resp_send.send((index, run(arg).await)).await {
+                    if resp_send.send((index, run(arg).await)).await.is_err() {
                         return;
                     }
                 }

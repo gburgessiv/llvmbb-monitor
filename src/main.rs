@@ -98,7 +98,7 @@ fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
     let (mut tx, rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         let mut start = Instant::now();
-        while let Ok(_) = tx.send(()).await {
+        while tx.send(()).await.is_ok() {
             let ideal_next = start + period;
             let now = Instant::now();
 
