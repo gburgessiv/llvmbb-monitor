@@ -117,24 +117,6 @@ fn is_successful_status(s: BuildbotResult) -> bool {
     s == BuildbotResult::Success || s == BuildbotResult::Warnings
 }
 
-/// Okay, starting from nothing:
-///
-/// Need to produce a HashMap<StringBotName, Bot>
-/// Bots are:
-/// - a State (building, idle, offline)
-/// - a MostRecentBuild (CompletedBuild)
-/// - a FirstFailingBuild (CompletedBuild)
-///
-/// The idea is:
-/// - grab the most recent build request ID, then track that for incremental updates (that has
-///   {builderid, buildsetid, buildrequestid} triples)
-/// - on the first sync, find the most recent builds for each builder, then the first failing for
-///   each.
-/// - after that, look at BuildRequestIDs that were accepted & pending
-///
-/// ^^ that said, builds that are _chronologically_ sequenced after one another (in source sets)
-/// can complete out-of-order. that's going to require extra bookkeeping.
-
 #[derive(Debug, Deserialize)]
 struct BuilderInfo {
     #[serde(rename = "builderid")]
