@@ -865,6 +865,21 @@ async fn perform_incremental_builder_sync(
                 // Otherwise, we may blame the wrong set of people, and have all sorts of all
                 // fun other effects downstream if a first_failing_build travels back in time.
                 //
+                // ^^ OK, so it looks like that's actually a potential issue today:
+                // http://lab.llvm.org:8011/#/builders/sanitizer-x86_64-linux has two builds
+                // happening simultaneously on different bots. Idea is to make the assumptions
+                // that:
+                // - if a worker takes a build with the local ID N, and another worker under the
+                //   same builder takes a build with local ID > N, the second worker must be working
+                //   with newer sources than the first one, and
+                // - if a pending build exists with a local ID == N, and a pending build with local
+                //   M, where M < N, does not exist, then build M is finished.
+                //
+                // From there, just keep a cache of CompletedBuilds that're blocked from being
+                // 'published'/resolved by earlier pending builds. And visit
+                // resolved_newly_completed_builds in such a way that multiple builds for the same
+                // bot is considered OK...
+                //
                 // FIXME: is_online freshness?
                 (
                     name.clone(),
