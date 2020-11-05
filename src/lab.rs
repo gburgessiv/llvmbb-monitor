@@ -526,13 +526,19 @@ async fn fetch_build_blamelist(
         .await?
         .changes;
 
-    results
+    // Some emails aren't trivially machine-parseable (e.g. "foo bar <x at y dot com>"). Don't even
+    // try to deal with those.
+
+    Ok(results
         .into_iter()
-        .map(|x| {
-            Email::parse(remove_name_from_email(&x.author))
-                .ok_or_else(|| anyhow!("failed parsing email: {:?}", x))
+        .filter_map(|x| match Email::parse(remove_name_from_email(&x.author)) {
+            Some(x) => Some(x),
+            None => {
+                warn!("Failed parsing email {:?} -- oh, well.", x.author);
+                None
+            }
         })
-        .collect()
+        .collect())
 }
 
 async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
