@@ -8,7 +8,7 @@ use crate::Email;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -74,9 +74,8 @@ async fn json_get_api<T>(client: &reqwest::Client, url: &reqwest::Url) -> Result
 where
     T: serde::de::DeserializeOwned,
 {
-    let max_attempts = 5usize;
+    let max_attempts = MAX_CONCURRENCY * 2;
     let mut attempt_number = 0usize;
-    let url_str = format!("{}", url);
     loop {
         let resp = match client
             .get(url.clone())
@@ -95,13 +94,13 @@ where
                 if attempt_number < max_attempts && is_incomplete_message_error(&x) {
                     warn!(
                         "Request to {:?} failed due to apparent connection shutdown; retrying: {}",
-                        url_str, x,
+                        url, x,
                     );
                     attempt_number += 1;
                     continue;
                 }
 
-                return Err(anyhow::Error::new(x).context(format!("requesting {:?}", url_str)));
+                return Err(anyhow::Error::new(x).context(format!("requesting {}", url)));
             }
             Ok(x) => x,
         };
@@ -109,7 +108,7 @@ where
         return Ok(resp
             .json()
             .await
-            .with_context(|| format!("parsing {:?}", url_str))?);
+            .with_context(|| format!("parsing {}", url))?);
     }
 }
 
@@ -136,13 +135,12 @@ async fn fetch_builder_info(client: &reqwest::Client, id: BotID) -> Result<Build
             .await?
             .builders;
 
-    if builders.len() != 1 {
-        bail!(
-            "bot ID {} matches {} bots; should match exactly 1",
-            id,
-            builders.len()
-        );
-    }
+    ensure!(
+        builders.len() == 1,
+        "bot ID {} matches {} bots; should match exactly 1",
+        id,
+        builders.len()
+    );
     Ok(builders.pop().unwrap())
 }
 
@@ -470,10 +468,8 @@ async fn concurrent_map_early_exit<
         .collect();
     std::mem::drop(resp_send);
 
-    let mut results = Vec::with_capacity(num_requests);
-    for _ in 0..num_requests {
-        results.push(None);
-    }
+    let mut results = Vec::new();
+    results.resize_with(num_requests, || None);
 
     while let Some((index, x)) = resp_recv.recv().await {
         match x {
