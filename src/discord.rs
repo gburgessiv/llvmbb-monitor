@@ -1,9 +1,5 @@
 use crate::storage::Storage;
-use crate::Bot;
-use crate::BotID;
-use crate::BotStatusSnapshot;
-use crate::CompletedBuild;
-use crate::Email;
+use crate::{Bot, BotID, BotStatusSnapshot, CompletedBuild, Email};
 
 use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
@@ -13,7 +9,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use futures::StreamExt;
 use log::{error, info, warn};
+use serenity::async_trait;
 use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::http::Http;
 use serenity::model::prelude::*;
@@ -254,7 +252,7 @@ struct BlamelistCache {
 }
 
 impl BlamelistCache {
-    fn append_blamelist(
+    async fn append_blamelist(
         &mut self,
         target: &mut String,
         http: &Http,
@@ -268,9 +266,10 @@ impl BlamelistCache {
 
         if self.known_guild_members.is_none() {
             let mut r: HashMap<UserId, Option<String>> = HashMap::new();
-            for member in guild.members_iter(http) {
+            let mut members_iter = guild.members_iter(http).boxed();
+            while let Some(member) = members_iter.next().await {
                 let member = member?;
-                r.insert(member.user.read().id, member.nick.clone());
+                r.insert(member.user.id, member.nick.clone());
             }
             info!("Fetched {} members from #{}", r.len(), guild);
             self.known_guild_members = Some(r);
@@ -366,15 +365,12 @@ impl ChannelServer {
         ui
     }
 
-    fn update_status_channel<S>(
+    async fn update_status_channel<S: Borrow<str>>(
         &self,
         http: &Http,
         messages: &[S],
         existing_messages: &mut Vec<ServerUIMessage>,
-    ) -> Result<()>
-    where
-        S: Borrow<str>,
-    {
+    ) -> Result<()> {
         let empty_message = "_ _";
         let padding_messages = MESSAGE_CACHE_SIZE.saturating_sub(messages.len());
         let new_messages = messages
@@ -391,7 +387,8 @@ impl ChannelServer {
                 }
 
                 self.status_channel
-                    .edit_message(http, prev_data.id, |m| m.content(&*data))?;
+                    .edit_message(http, prev_data.id, |m| m.content(&*data))
+                    .await?;
 
                 prev_data.last_value = data.to_owned();
                 continue;
@@ -399,7 +396,8 @@ impl ChannelServer {
 
             let discord_message = self
                 .status_channel
-                .send_message(http, |m| m.content(&*data))?;
+                .send_message(http, |m| m.content(&*data))
+                .await?;
             existing_messages.push(ServerUIMessage {
                 last_value: data.to_owned(),
                 id: discord_message.id,
@@ -409,12 +407,12 @@ impl ChannelServer {
         debug_assert!(num_messages <= existing_messages.len());
         for _ in num_messages..existing_messages.len() {
             let id = existing_messages.pop().unwrap().id;
-            self.status_channel.delete_message(http, id)?;
+            self.status_channel.delete_message(http, id).await?;
         }
         Ok(())
     }
 
-    fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
+    async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
@@ -451,13 +449,15 @@ impl ChannelServer {
                 )
                 .unwrap();
             } else {
-                blamelist_cache.append_blamelist(
-                    &mut current_message,
-                    http,
-                    &next_breakage.build.blamelist,
-                    self.guild,
-                    &*self.storage,
-                )?;
+                blamelist_cache
+                    .append_blamelist(
+                        &mut current_message,
+                        http,
+                        &next_breakage.build.blamelist,
+                        self.guild,
+                        &*self.storage,
+                    )
+                    .await?;
             }
 
             for msg in split_message(current_message, DISCORD_MESSAGE_SIZE_LIMIT) {
@@ -467,7 +467,8 @@ impl ChannelServer {
                 // On the bright side, `split_message` shouldn't do that like 99.99% of the time. I
                 // hope. 2K chars is a lot, fam.
                 self.updates_channel
-                    .send_message(http, |m| m.content(msg))?;
+                    .send_message(http, |m| m.content(msg))
+                    .await?;
             }
 
             self.unsent_breakages.pop_front();
@@ -475,7 +476,7 @@ impl ChannelServer {
         Ok(())
     }
 
-    fn serve<F>(
+    async fn serve<F>(
         &mut self,
         http: &Http,
         ui: &mut UIBroadcastReceiver,
@@ -490,9 +491,12 @@ impl ChannelServer {
         let mut most_recent_id = MessageId(0);
         loop {
             let max_messages = 50;
-            let messages = self.status_channel.messages(http, |retriever| {
-                retriever.after(most_recent_id).limit(max_messages)
-            })?;
+            let messages = self
+                .status_channel
+                .messages(http, |retriever| {
+                    retriever.after(most_recent_id).limit(max_messages)
+                })
+                .await?;
 
             if messages.is_empty() {
                 break;
@@ -523,7 +527,7 @@ impl ChannelServer {
             for message_id in not_mine {
                 // "You can only bulk delete messages that are under 14 days old," so no bulk
                 // delete API for us.
-                self.status_channel.delete_message(http, message_id)?;
+                self.status_channel.delete_message(http, message_id).await?;
             }
         }
 
@@ -538,7 +542,7 @@ impl ChannelServer {
             for msg in &existing_messages {
                 // "You can only bulk delete messages that are under 14 days old," so no bulk
                 // delete API for us.
-                self.status_channel.delete_message(http, msg.id)?;
+                self.status_channel.delete_message(http, msg.id).await?;
             }
             existing_messages.clear();
         } else {
@@ -558,15 +562,17 @@ impl ChannelServer {
                     ":man_construction_worker: one moment -- set-up is in progress... ",
                     ":woman_construction_worker:"
                 )];
-                self.update_status_channel(http, messages, &mut existing_messages)?;
+                self.update_status_channel(http, messages, &mut existing_messages)
+                    .await?;
                 self.await_next_ui(ui)
             }
             Some(x) => x.clone(),
         };
 
         loop {
-            self.update_status_channel(http, &current_ui.messages, &mut existing_messages)?;
-            self.update_updates_channel(http)?;
+            self.update_status_channel(http, &current_ui.messages, &mut existing_messages)
+                .await?;
+            self.update_updates_channel(http).await?;
 
             if should_exit() {
                 return Ok(());
@@ -711,8 +717,9 @@ impl MessageHandler {
     }
 }
 
+#[async_trait]
 impl serenity::client::EventHandler for MessageHandler {
-    fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
+    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
         info!("Guild #{} ({}) has been created", guild.id, guild.name);
 
         let guild_id = guild.id;
@@ -740,7 +747,7 @@ impl serenity::client::EventHandler for MessageHandler {
         let find_channel_id = |name: &str| match guild
             .channels
             .iter()
-            .filter(|x| x.1.read().name == name)
+            .filter(|x| x.1.name == name)
             .map(|x| x.0)
             .next()
         {
@@ -764,12 +771,12 @@ impl serenity::client::EventHandler for MessageHandler {
             None => return,
         };
 
-        let bot_user_id = ctx.cache.read().user.id;
+        let bot_user_id = ctx.cache.current_user_id().await;
         let http = ctx.http;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
         let storage = self.storage.clone();
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             let mut responded_with_yes = false;
             let mut should_exit = move || {
                 if responded_with_yes {
@@ -811,7 +818,10 @@ impl serenity::client::EventHandler for MessageHandler {
             };
             loop {
                 info!("Setting up serving for guild #{}", guild_id);
-                if let Err(x) = server.serve(&*http, &mut pubsub_reader, &mut should_exit) {
+                if let Err(x) = server
+                    .serve(&*http, &mut pubsub_reader, &mut should_exit)
+                    .await
+                {
                     error!("Failed serving guild #{}: {}", guild_id, x);
                 }
 
@@ -820,7 +830,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
 
                 // If we're seeing errors, it's probs best to sit back for a bit.
-                std::thread::sleep(Duration::from_secs(30));
+                tokio::time::sleep(Duration::from_secs(30)).await;
 
                 // Double-check this, since there's a chance we saw errors related to an in-flight
                 // shutdown notice.
@@ -833,56 +843,42 @@ impl serenity::client::EventHandler for MessageHandler {
         });
     }
 
-    fn guild_delete(
+    async fn guild_delete(
         &self,
         _ctx: Context,
-        incomplete_guild: PartialGuild,
-        _full_data: Option<Arc<RwLock<Guild>>>,
+        incomplete_guild: GuildUnavailable,
+        _full_data: Option<Guild>,
     ) {
         info!("Guild #{} has been deleted", incomplete_guild.id);
         self.decref_guild_server(incomplete_guild.id);
     }
 
-    fn guild_unavailable(&self, _ctx: Context, guild_id: GuildId) {
+    async fn guild_unavailable(&self, _ctx: Context, guild_id: GuildId) {
         warn!("Guild #{} is now unavailable", guild_id);
         self.decref_guild_server(guild_id);
     }
 
-    fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
+    async fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
         if event.new == serenity::gateway::ConnectionStage::Connected {
             info!("New shard connection established");
-            ctx.set_activity(Activity::playing(self.bot_version));
+            ctx.set_activity(Activity::playing(self.bot_version)).await;
         }
     }
 
-    fn message(&self, ctx: Context, message: Message) {
+    async fn message(&self, ctx: Context, message: Message) {
         if !message.is_private() || message.author.bot {
             return;
         }
 
-        let response: Option<String>;
-
         let content = message.content.trim();
         let mut content_fields = content.split_whitespace();
-        if let Some(command) = content_fields.next() {
-            let from_uid = message.author.id;
-            match command {
-                "add-email" => {
-                    response = Some(self.handle_add_email(from_uid, content_fields.next()));
-                }
-                "list-emails" => {
-                    response = Some(self.handle_list_emails(from_uid));
-                }
-                "rm-email" => {
-                    response = Some(self.handle_remove_email(from_uid, content_fields.next()));
-                }
-                _ => {
-                    response = None;
-                }
-            }
-        } else {
-            response = None;
-        }
+        let from_uid = message.author.id;
+        let response: Option<String> = match content_fields.next() {
+            Some("add-email") => Some(self.handle_add_email(from_uid, content_fields.next())),
+            Some("list-emails") => Some(self.handle_list_emails(from_uid)),
+            Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
+            Some(_) | None => None,
+        };
 
         let default_content = concat!(
             "Hi! I'm a bot developed at https://github.com/gburgessiv/llvmbb-monitor. ",
@@ -904,7 +900,11 @@ impl serenity::client::EventHandler for MessageHandler {
 
         let response = response.unwrap_or_else(|| default_content.into());
         for msg in split_message(response, DISCORD_MESSAGE_SIZE_LIMIT) {
-            if let Err(x) = message.author.direct_message(&ctx, |m| m.content(msg)) {
+            if let Err(x) = message
+                .author
+                .direct_message(&ctx, |m| m.content(msg))
+                .await
+            {
                 error!("Failed to respond to user message: {}", x);
                 break;
             }
@@ -1332,17 +1332,18 @@ async fn draw_ui(
     let mut update_ui = UpdateUIUpdater::default();
 
     loop {
-        let snapshot = match events.recv().await {
-            Some(Some(x)) => x,
-            Some(None) => {
+        if let Err(_) = events.changed().await {
+            info!("UI events channel is gone; drawer is shutting down");
+            return;
+        }
+
+        let snapshot: Arc<BotStatusSnapshot> = match events.borrow().as_ref() {
+            Some(x) => x.clone(),
+            None => {
                 if looped_before {
                     error!("UI drawer got an unexpected `None` BB info");
                 }
                 continue;
-            }
-            None => {
-                info!("UI events channel is gone; drawer is shutting down");
-                return;
             }
         };
 
@@ -1362,15 +1363,21 @@ pub(crate) fn run(
     storage: Storage,
 ) -> Result<()> {
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
+    let storage = Arc::new(Mutex::new(storage));
     runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
-    let handler = MessageHandler {
-        ui_broadcaster,
-        servers: Default::default(),
-        bot_version,
-        storage: Arc::new(Mutex::new(storage)),
-    };
-    serenity::Client::new(token, handler)?.start()?;
-    Ok(())
+    runtime.block_on(async move {
+        serenity::Client::builder(token)
+            .event_handler(MessageHandler {
+                ui_broadcaster,
+                servers: Default::default(),
+                bot_version,
+                storage,
+            })
+            .await?
+            .start()
+            .await?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

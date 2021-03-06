@@ -451,7 +451,7 @@ async fn concurrent_map_early_exit<
     let join_handles: Vec<_> = (0..jobs)
         .map(|_| {
             let request_stack = request_stack.clone();
-            let mut resp_send = resp_send.clone();
+            let resp_send = resp_send.clone();
             let run = run.clone();
             tokio::spawn(async move {
                 loop {

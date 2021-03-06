@@ -94,35 +94,16 @@ struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
 }
 
-fn new_async_ticker(period: Duration) -> tokio::sync::mpsc::Receiver<()> {
-    let (mut tx, rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
-        let mut start = Instant::now();
-        while tx.send(()).await.is_ok() {
-            let ideal_next = start + period;
-            let now = Instant::now();
-
-            start = if now < ideal_next {
-                tokio::time::delay_until(ideal_next.into()).await;
-                ideal_next
-            } else {
-                now
-            };
-        }
-    });
-    rx
-}
-
 async fn publish_forever(
     client: reqwest::Client,
     notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
 ) {
-    let mut ticks = new_async_ticker(Duration::from_secs(60));
+    let mut ticks = tokio::time::interval(Duration::from_secs(60));
     let mut lab_state = None;
     let mut last_lab_snapshot = HashMap::new();
     let mut last_greendragon_snapshot = HashMap::new();
     loop {
-        ticks.recv().await.expect("ticker shut down unexpectedly");
+        ticks.tick().await;
 
         let start_time = Instant::now();
         let (lab_update, greendragon_update) = futures::future::join(
@@ -193,7 +174,7 @@ async fn publish_forever(
         let this_snapshot = Arc::new(BotStatusSnapshot {
             bots: this_snapshot,
         });
-        if notifications.broadcast(Some(this_snapshot)).is_err() {
+        if notifications.send(Some(this_snapshot)).is_err() {
             warn!("All lab handles are closed; shutting down publishing loop");
             return;
         }
