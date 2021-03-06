@@ -5,7 +5,7 @@ use std::borrow::{Borrow, Cow};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -60,8 +60,8 @@ impl<T> InfiniteVec<T>
 where
     T: Clone,
 {
-    fn push(&mut self, elem: T) {
-        self.values.push(elem);
+    fn extend<It: IntoIterator<Item = T>>(&mut self, elems: It) {
+        self.values.extend(elems);
     }
 
     fn compact(&mut self) {
@@ -120,7 +120,6 @@ where
 
 #[derive(Default)]
 struct UIBroadcasterState {
-    version: usize,
     last_ui: Option<Arc<UI>>,
     failed_bots: InfiniteVec<Arc<BotBuild>>,
 }
@@ -128,45 +127,38 @@ struct UIBroadcasterState {
 #[derive(Default)]
 struct UIBroadcaster {
     state: Mutex<UIBroadcasterState>,
-    updates: Condvar,
+    updates: Arc<tokio::sync::Notify>,
 }
 
 impl UIBroadcaster {
     fn publish(&self, next_ui: Arc<UI>, new_failed_builds: &[Arc<BotBuild>]) {
         let mut state = self.state.lock().unwrap();
-        state.version += 1;
         state.last_ui = Some(next_ui);
         state.failed_bots.compact();
-        for f in new_failed_builds {
-            state.failed_bots.push(f.clone());
-        }
-        self.updates.notify_all();
+        state.failed_bots.extend(new_failed_builds.iter().cloned());
+        self.updates.notify_waiters();
     }
 
     fn receiver(me: &Arc<Self>) -> UIBroadcastReceiver {
         let token = me.state.lock().unwrap().failed_bots.register();
         UIBroadcastReceiver {
             broadcaster: me.clone(),
-            last_version: 0,
             token,
+            waiter: me.updates.clone(),
         }
     }
 }
 
 struct UIBroadcastReceiver {
     broadcaster: Arc<UIBroadcaster>,
-    last_version: usize,
     token: InfiniteVecToken,
+    waiter: Arc<tokio::sync::Notify>,
 }
 
 impl UIBroadcastReceiver {
-    fn next(&mut self) -> (Arc<UI>, Vec<Arc<BotBuild>>) {
+    async fn next(&mut self) -> (Arc<UI>, Vec<Arc<BotBuild>>) {
+        self.waiter.notified().await;
         let mut state = self.broadcaster.state.lock().unwrap();
-        while state.version == self.last_version {
-            state = self.broadcaster.updates.wait(state).unwrap();
-        }
-        self.last_version = state.version;
-
         let ui = state
             .last_ui
             .as_ref()
@@ -358,8 +350,8 @@ fn url_escape_bot_name(bot_name: &str) -> Cow<'_, str> {
 const MESSAGE_CACHE_SIZE: usize = 5;
 
 impl ChannelServer {
-    fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
-        let (ui, new_breakages) = receiver.next();
+    async fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
+        let (ui, new_breakages) = receiver.next().await;
         self.ui = Some(ui.clone());
         self.unsent_breakages.extend(new_breakages.into_iter());
         ui
@@ -564,7 +556,7 @@ impl ChannelServer {
                 )];
                 self.update_status_channel(http, messages, &mut existing_messages)
                     .await?;
-                self.await_next_ui(ui)
+                self.await_next_ui(ui).await
             }
             Some(x) => x.clone(),
         };
@@ -578,7 +570,7 @@ impl ChannelServer {
                 return Ok(());
             }
 
-            current_ui = self.await_next_ui(ui);
+            current_ui = self.await_next_ui(ui).await;
         }
     }
 }
