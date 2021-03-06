@@ -182,11 +182,16 @@ async fn publish_forever(
 }
 
 fn init_logger_or_die() {
-    let mut logger = simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Info);
+    let mut logger = simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Warn);
     // Hyper and reqwest give a loot of `DEBUG` information.
-    if cfg!(debug_assertions) {
-        logger = logger.with_module_level("llvm_buildbot_monitor", log::LevelFilter::Debug);
-    }
+    logger = logger.with_module_level(
+        "llvm_buildbot_monitor",
+        if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        },
+    );
     logger.init().unwrap();
 }
 
