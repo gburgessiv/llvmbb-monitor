@@ -1410,21 +1410,21 @@ mod test {
         let token_a = vec.register();
         assert!(vec.get_all(&token_a).is_empty());
 
-        vec.push(1);
+        vec.extend(std::iter::once(1));
         assert_eq!(vec.get_all(&token_a), &[1]);
         assert!(vec.get_all(&token_a).is_empty());
 
         let token_b = vec.register();
         assert!(vec.get_all(&token_a).is_empty());
 
-        vec.push(2);
+        vec.extend(std::iter::once(2));
         assert_eq!(vec.get_all(&token_a), &[2]);
         assert_eq!(vec.get_all(&token_b), &[2]);
 
-        vec.push(3);
+        vec.extend(std::iter::once(3));
         let token_c = vec.register();
 
-        vec.push(4);
+        vec.extend(std::iter::once(4));
         assert_eq!(vec.get_all(&token_a), &[3, 4]);
         vec.compact();
 
@@ -1438,12 +1438,12 @@ mod test {
     #[test]
     fn test_infinite_vec_compacts_properly_with_no_registration() {
         let mut vec = InfiniteVec::<i32>::default();
-        vec.push(1);
+        vec.extend(std::iter::once(1));
         vec.compact();
         assert!(vec.values.is_empty());
 
         let token = vec.register();
-        vec.push(2);
+        vec.extend(std::iter::once(2));
         vec.unregister(&token);
         vec.compact();
         assert!(vec.values.is_empty());
