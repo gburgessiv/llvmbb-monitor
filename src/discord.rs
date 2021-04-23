@@ -408,8 +408,18 @@ impl ChannelServer {
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
-            current_message += "**New build breakage**: <";
 
+            let (bot_category, bot_name) = match &next_breakage.bot_id {
+                BotID::GreenDragon { name } => ("GreenDragon", name.as_str()),
+                BotID::Lab { name, .. } => ("Lab", name.as_str()),
+            };
+
+            write!(
+                current_message,
+                "**New build breakage in {}/{}**: <",
+                bot_category, bot_name,
+            )
+            .unwrap();
             match &next_breakage.bot_id {
                 BotID::GreenDragon { name } => write!(
                     current_message,
