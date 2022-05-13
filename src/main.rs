@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{error, info, warn};
+use structopt::StructOpt;
 use tokio::sync::watch;
 
 mod discord;
@@ -182,7 +183,9 @@ async fn publish_forever(
 }
 
 fn init_logger_or_die() {
-    let mut logger = simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Warn);
+    let mut logger = simple_logger::SimpleLogger::new()
+        .with_utc_timestamps()
+        .with_level(log::LevelFilter::Warn);
     // Hyper and reqwest give a loot of `DEBUG` information.
     logger = logger.with_module_level(
         "llvm_buildbot_monitor",
@@ -195,38 +198,30 @@ fn init_logger_or_die() {
     logger.init().unwrap();
 }
 
+#[derive(StructOpt)]
+struct Opts {
+    #[structopt(long)]
+    discord_token: String,
+    #[structopt(long)]
+    database: String,
+}
+
 fn main() -> Result<()> {
     init_logger_or_die();
-    let matches = clap::App::new("llvm_buildbot_monitor")
-        .arg(
-            clap::Arg::with_name("discord_token")
-                .long("discord_token")
-                .takes_value(true)
-                .required(true),
-        )
-        .arg(
-            clap::Arg::with_name("database")
-                .long("database")
-                .takes_value(true)
-                .required(true),
-        )
-        .get_matches();
-
-    let discord_token = matches.value_of("discord_token").unwrap();
-    let database_file = matches.value_of("database").unwrap();
+    let opts = Opts::from_args();
     let client = reqwest::ClientBuilder::new()
         // The lab can take a while to hand back results, but 60 seconds should be enough
         // for anybody.
         .timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(lab::MAX_CONCURRENCY)
         .build()?;
-    let storage = storage::Storage::from_file(&database_file)?;
+    let storage = storage::Storage::from_file(&opts.database)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
     tokio_rt.spawn(publish_forever(client, snapshots_tx));
     discord::run(
-        &discord_token,
+        &opts.discord_token,
         git_version::git_version!(),
         snapshots_rx,
         tokio_rt,

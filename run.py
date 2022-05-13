@@ -55,7 +55,7 @@ class Runner:
                     self._proc = subprocess.Popen(
                         [
                             self._exe_loc,
-                            '--discord_token=' + self._discord_token,
+                            '--discord-token=' + self._discord_token,
                             '--database=' + self._database_loc,
                         ],
                         stdin=subprocess.DEVNULL,
