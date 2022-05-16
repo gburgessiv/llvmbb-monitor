@@ -41,7 +41,7 @@ impl LocalBuildNumber {
 
 lazy_static! {
     static ref HOST: reqwest::Url =
-        reqwest::Url::parse("http://lab.llvm.org:8011/api/v2/").expect("parsing lab URL");
+        reqwest::Url::parse("http://lab.llvm.org/buildbot/api/v2/").expect("parsing lab URL");
 }
 
 fn find_chained_error_of_type<Src: std::error::Error + 'static, E: std::error::Error + 'static>(
@@ -589,7 +589,7 @@ fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
     // So we split the name, looking for known categories in the split. If we find more than zero,
     // we prioritize these categories based on a predetermined 'importance list', and return the
     // winner. Directly below is said importance list. Ordering was intuit'ed by glancing at
-    // http://lab.llvm.org:8011/#/builders.
+    // http://lab.llvm.org/buildbot/#/builders.
     let known_categories = [
         "clang",
         "polly",

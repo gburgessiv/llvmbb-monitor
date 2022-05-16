@@ -3,7 +3,8 @@
 ## Summary
 
 This is a simple bot that watches LLVM's upstream buildbots @
-http://lab.llvm.org:8011/console , and posts updates to two discord channels.
+http://lab.llvm.org/buildbot/#/console , and posts updates to two discord
+channels.
 
 In order to use this bot, a discord server must exist and have the following two
 channels:

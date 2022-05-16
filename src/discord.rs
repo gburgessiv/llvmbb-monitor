@@ -433,7 +433,7 @@ impl ChannelServer {
                     // it is...
                     write!(
                         current_message,
-                        "http://lab.llvm.org:8011/#/builders/{}/builds/{}",
+                        "http://lab.llvm.org/buildbot/#/builders/{}/builds/{}",
                         id, next_breakage.build.id
                     )
                 }
@@ -1222,7 +1222,7 @@ impl StatusUIUpdater {
 
                 let (url_prefix, bot_name): (&str, &str) = match &bot_id {
                     BotID::GreenDragon { name } => ("http://green.lab.llvm.org/green/job", name),
-                    BotID::Lab { name, .. } => ("http://lab.llvm.org:8011/#/builders", name),
+                    BotID::Lab { name, .. } => ("http://lab.llvm.org/buildbot/#/builders", name),
                 };
 
                 write!(
