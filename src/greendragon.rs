@@ -48,21 +48,22 @@ enum Color {
     Blue { flashing: bool },
     Disabled,
     Red { flashing: bool },
+    Yellow { flashing: bool },
 }
 
-fn valid_color_values() -> &'static [(&'static str, Color)] {
-    &[
-        // All of the aborted builds I can find are colored grey on the UI, so.
-        ("aborted", Color::Disabled),
-        ("aborted_anime", Color::Disabled),
-        ("blue", Color::Blue { flashing: false }),
-        ("blue_anime", Color::Blue { flashing: true }),
-        ("disabled", Color::Disabled),
-        ("notbuilt", Color::Disabled),
-        ("red", Color::Red { flashing: false }),
-        ("red_anime", Color::Red { flashing: true }),
-    ]
-}
+const VALID_COLOR_VALUES: &'static [(&'static str, Color)] = &[
+    // All of the aborted builds I can find are colored grey on the UI, so.
+    ("aborted", Color::Disabled),
+    ("aborted_anime", Color::Disabled),
+    ("blue", Color::Blue { flashing: false }),
+    ("blue_anime", Color::Blue { flashing: true }),
+    ("disabled", Color::Disabled),
+    ("notbuilt", Color::Disabled),
+    ("red", Color::Red { flashing: false }),
+    ("red_anime", Color::Red { flashing: true }),
+    ("yellow", Color::Yellow { flashing: false }),
+    ("yellow_anime", Color::Yellow { flashing: true }),
+];
 
 struct ColorVisitor;
 
@@ -73,7 +74,7 @@ impl<'de> serde::de::Visitor<'de> for ColorVisitor {
         write!(
             f,
             "one of {:?}",
-            valid_color_values()
+            VALID_COLOR_VALUES
                 .iter()
                 .map(|x| x.0)
                 .collect::<Vec<&'static str>>()
@@ -84,7 +85,7 @@ impl<'de> serde::de::Visitor<'de> for ColorVisitor {
     where
         E: serde::de::Error,
     {
-        for (name, res) in valid_color_values() {
+        for (name, res) in VALID_COLOR_VALUES {
             if *name == s {
                 return Ok(*res);
             }
@@ -289,7 +290,7 @@ async fn fetch_single_bot_status_snapshot(
             most_recent_build,
             is_online: match color {
                 Color::Disabled => false,
-                Color::Red { .. } | Color::Blue { .. } => true,
+                Color::Red { .. } | Color::Blue { .. } | Color::Yellow { .. } => true,
             },
         },
     }))
