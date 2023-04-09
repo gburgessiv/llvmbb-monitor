@@ -17,6 +17,10 @@ pub(crate) type BotID = u32;
 
 pub(crate) const MAX_CONCURRENCY: usize = 4;
 
+// If the most recent build we've received from a builder is this old, pretend the builder
+// doesn't exist. Lab's API still returns older builders for some reason.
+fn max_builder_build_age() -> chrono::Duration { chrono::Duration::weeks(2) }
+
 // Buildbot has two flavors of build IDs: build IDs _local to a bot_, and _globally unique_
 // build IDs. Represent those as distinct types, so they're difficult to inadvertently flip.
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
@@ -676,6 +680,7 @@ async fn perform_initial_builder_sync(
         .max()
         .ok_or_else(|| anyhow!("no builds found"))?;
 
+    let drop_builder_if_before = chrono::Utc::now().naive_utc() - max_builder_build_age();
     let resolved_builds: Vec<(BotID, (String, Bot))> = {
         let client = client.clone();
         concurrent_map_early_exit(
@@ -688,7 +693,21 @@ async fn perform_initial_builder_sync(
                         info!("Dropping {:?}; it has no builds", bot_info.name);
                         None
                     }
-                    Some(x) => Some((bot_info, x)),
+                    Some(x) => {
+                        if x.pending_builds.is_empty()
+                            && x.most_recent_build.complete_at < drop_builder_if_before
+                        {
+                            use chrono::TimeZone;
+                            info!(
+                                "Dropping {:?}; its most recent build is too old (completed at {})",
+                                bot_info.name,
+                                chrono::Utc.from_utc_datetime(&x.most_recent_build.complete_at)
+                            );
+                            None
+                        } else {
+                            Some((bot_info, x))
+                        }
+                    }
                 }),
             move |(bot_info, actual_build)| {
                 let client = client.clone();
@@ -795,6 +814,7 @@ async fn fetch_build_by_id(
     Ok(builds.pop().unwrap())
 }
 
+// TODO: Drop builders that have builds older than max_builder_build_age()
 async fn perform_incremental_builder_sync(
     client: &reqwest::Client,
     prev_state: &LabState,
