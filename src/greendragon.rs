@@ -329,6 +329,7 @@ enum RawBuildResult {
     Aborted,
     Success,
     Failure,
+    Unstable,
 }
 
 impl<'de> Deserialize<'de> for RawBuildResult {
@@ -353,6 +354,7 @@ impl<'de> Deserialize<'de> for RawBuildResult {
                     "ABORTED" => Ok(RawBuildResult::Aborted),
                     "SUCCESS" => Ok(RawBuildResult::Success),
                     "FAILURE" => Ok(RawBuildResult::Failure),
+                    "UNSTABLE" => Ok(RawBuildResult::Unstable),
                     _ => Err(E::custom(format!("{:?} isn't a valid RawBuildResult", s))),
                 }
             }
@@ -433,7 +435,9 @@ async fn fetch_completed_build(
         status: match data.result {
             RawBuildResult::Aborted => BuildbotResult::Exception,
             RawBuildResult::Success => BuildbotResult::Success,
-            RawBuildResult::Failure => BuildbotResult::Failure,
+            // I'm not... entirely sure what 'unstable' means. Looks like it's just "test
+            // failures" at a cursory glance?
+            RawBuildResult::Failure | RawBuildResult::Unstable => BuildbotResult::Failure,
         },
         completion_time: data.timestamp.as_datetime()?,
         blamelist,
