@@ -748,13 +748,15 @@ async fn fetch_latest_build_statuses(
     let fetch_amount = 300;
     let fetch_amount_str = fetch_amount.to_string();
     let mut query_url = HOST.join("builds")?;
-    for start in (0usize..).step_by(fetch_amount) {
+    let mut offset_iter = (0usize..).step_by(fetch_amount);
+    loop {
+        let offset = offset_iter.next().unwrap();
         query_url
             .query_pairs_mut()
             .clear()
             .append_pair("order", "-buildid")
             .append_pair("limit", &fetch_amount_str)
-            .append_pair("offset", &start.to_string());
+            .append_pair("offset", &offset.to_string());
 
         let page = json_get_api::<BuildsResult>(client, &query_url)
             .await?
@@ -766,8 +768,6 @@ async fn fetch_latest_build_statuses(
             return Ok(results);
         }
     }
-
-    unreachable!();
 }
 
 async fn fetch_build_by_id(
