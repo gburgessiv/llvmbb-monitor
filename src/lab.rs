@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use chrono::TimeZone;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -19,7 +20,9 @@ pub(crate) const MAX_CONCURRENCY: usize = 4;
 
 // If the most recent build we've received from a builder is this old, pretend the builder
 // doesn't exist. Lab's API still returns older builders for some reason.
-fn max_builder_build_age() -> chrono::Duration { chrono::Duration::weeks(2) }
+fn max_builder_build_age() -> chrono::Duration {
+    chrono::Duration::weeks(2)
+}
 
 // Buildbot has two flavors of build IDs: build IDs _local to a bot_, and _globally unique_
 // build IDs. Represent those as distinct types, so they're difficult to inadvertently flip.
@@ -697,7 +700,6 @@ async fn perform_initial_builder_sync(
                         if x.pending_builds.is_empty()
                             && x.most_recent_build.complete_at < drop_builder_if_before
                         {
-                            use chrono::TimeZone;
                             info!(
                                 "Dropping {:?}; its most recent build is too old (completed at {})",
                                 bot_info.name,
@@ -814,7 +816,6 @@ async fn fetch_build_by_id(
     Ok(builds.pop().unwrap())
 }
 
-// TODO: Drop builders that have builds older than max_builder_build_age()
 async fn perform_incremental_builder_sync(
     client: &reqwest::Client,
     prev_state: &LabState,
@@ -988,6 +989,27 @@ async fn perform_incremental_builder_sync(
         if !new_results.contains_key(id) {
             new_results.insert(*id, status.clone());
         }
+    }
+
+    // If any builders have become too old, drop them. Technically we could have a pending or
+    // blocked build that is _just about_ to land for a builder, but it's a rare inefficiency if we
+    // miss that, rather than a correctness issue (since the loop that constructs `new_results`
+    // will full-sync unknown bots.
+    {
+        let drop_builder_if_before = chrono::Utc::now().naive_utc() - max_builder_build_age();
+        new_results.retain(|name, bot| {
+            let completion_time = &bot.1.status.most_recent_build.completion_time;
+            if *completion_time < drop_builder_if_before {
+                info!(
+                    "Dropping {:?}; its most recent build is too old (completed at {})",
+                    name,
+                    chrono::Utc.from_utc_datetime(completion_time)
+                );
+                false
+            } else {
+                true
+            }
+        });
     }
 
     let new_lab_state = LabState {
