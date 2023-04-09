@@ -119,6 +119,13 @@ struct RawStatusBuild {
     number: BuildNumber,
 }
 
+fn is_sorted_by<T>(container: &[T], mut cmp: impl FnMut(&T, &T) -> bool) -> bool {
+    container
+        .iter()
+        .zip(container.iter().skip(1))
+        .all(|(a, b)| cmp(a, b))
+}
+
 async fn find_first_failing_build(
     client: &reqwest::Client,
     bot_name: &str,
@@ -126,7 +133,7 @@ async fn find_first_failing_build(
     last_successful: Option<BuildNumber>,
     last_failure: BuildNumber,
 ) -> Result<CompletedBuild> {
-    debug_assert!(build_list.is_sorted_by_key(|x| x.number));
+    debug_assert!(is_sorted_by(build_list, |x, y| x.number < y.number));
 
     let search_start: usize = if let Some(s) = last_successful {
         assert!(last_failure > s, "{} should be > {}", last_failure, s);

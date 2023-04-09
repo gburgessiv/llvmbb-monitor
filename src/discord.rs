@@ -1039,6 +1039,7 @@ impl StatusUIUpdater {
         let mut categories: HashMap<&'a str, HashMap<&'a BotID, &'a Bot>> = HashMap::new();
         let mut skipped = 0usize;
         for (name, bot) in &snapshot.bots {
+            info!("Note: {name:?} is online: {}", bot.status.is_online);
             if !bot.status.is_online {
                 skipped += 1;
                 continue;
