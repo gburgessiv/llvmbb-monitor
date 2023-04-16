@@ -553,7 +553,7 @@ async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
         id: build.local_build_id.as_local_crate_build_number(),
         status: build.result,
         completion_time: build.complete_at,
-        blamelist,
+        blamelist: blamelist.into(),
     })
 }
 

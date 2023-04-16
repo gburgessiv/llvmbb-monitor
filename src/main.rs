@@ -62,7 +62,7 @@ struct CompletedBuild {
     completion_time: chrono::NaiveDateTime,
     // This is 'blame' in the same way that 'git blame' is 'blame': it's the set of authors who
     // have changes in the current build.
-    blamelist: Vec<Email>,
+    blamelist: Box<[Email]>,
 }
 
 // FIXME: Adding a 'certain' field and surfacing that in discord may be nice? If a bot history goes

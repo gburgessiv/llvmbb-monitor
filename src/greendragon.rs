@@ -440,6 +440,6 @@ async fn fetch_completed_build(
             RawBuildResult::Failure | RawBuildResult::Unstable => BuildbotResult::Failure,
         },
         completion_time: data.timestamp.as_datetime()?,
-        blamelist,
+        blamelist: blamelist.into(),
     })
 }
