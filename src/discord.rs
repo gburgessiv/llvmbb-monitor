@@ -240,7 +240,7 @@ struct ServerUIMessage {
 struct BlamelistCache {
     email_id_mappings: HashMap<Email, Vec<UserId>>,
     // Cache of User ID -> Optional nickname
-    known_guild_members: Option<HashMap<UserId, Option<String>>>,
+    known_guild_members: Option<HashMap<UserId, Option<Box<str>>>>,
 }
 
 impl BlamelistCache {
@@ -257,11 +257,11 @@ impl BlamelistCache {
         }
 
         if self.known_guild_members.is_none() {
-            let mut r: HashMap<UserId, Option<String>> = HashMap::new();
+            let mut r: HashMap<UserId, Option<Box<str>>> = HashMap::new();
             let mut members_iter = guild.members_iter(http).boxed();
             while let Some(member) = members_iter.next().await {
                 let member = member?;
-                r.insert(member.user.id, member.nick.clone());
+                r.insert(member.user.id, member.nick.map(|x| x.into_boxed_str()));
             }
             info!("Fetched {} members from #{}", r.len(), guild);
             self.known_guild_members = Some(r);
