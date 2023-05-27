@@ -1184,7 +1184,12 @@ impl StatusUIUpdater {
         for (category_name, bots) in categorized {
             let mut failed_bots: Vec<_> = bots
                 .iter()
-                .filter_map(|(name, bot)| bot.status.first_failing_build.as_ref().map(|x| (*name, x.id, x.completion_time)))
+                .filter_map(|(name, bot)| {
+                    bot.status
+                        .first_failing_build
+                        .as_ref()
+                        .map(|x| (*name, x.id, x.completion_time))
+                })
                 .collect();
 
             if failed_bots.is_empty() {
@@ -1290,9 +1295,7 @@ impl UpdateUIUpdater {
         let now_broken: Vec<(&BotID, &CompletedBuild)> = snapshot
             .bots
             .iter()
-            .filter_map(|(id, bot)| {
-                bot.status.first_failing_build.as_ref().map(|x| (id, x))
-            })
+            .filter_map(|(id, bot)| bot.status.first_failing_build.as_ref().map(|x| (id, x)))
             .collect();
 
         let newly_broken = if let Some(previously_broken) = &self.previously_broken_bots {
@@ -1327,7 +1330,7 @@ async fn draw_ui(
     let mut update_ui = UpdateUIUpdater::default();
 
     loop {
-        if let Err(_) = events.changed().await {
+        if events.changed().await.is_err() {
             info!("UI events channel is gone; drawer is shutting down");
             return;
         }

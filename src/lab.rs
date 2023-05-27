@@ -670,12 +670,12 @@ async fn perform_initial_builder_sync(
         .await?
     };
 
-    let mut pending_builds = Vec::new();
-    for x in &actual_builds {
-        if let Some(x) = x {
-            pending_builds.extend(&x.pending_builds);
-        }
-    }
+    let pending_builds = actual_builds
+        .iter()
+        .flatten()
+        .flat_map(|x| x.pending_builds.iter())
+        .copied()
+        .collect::<Vec<_>>();
 
     let most_recent_build = actual_builds
         .iter()
