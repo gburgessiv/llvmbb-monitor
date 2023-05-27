@@ -93,8 +93,17 @@ struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
 }
 
+fn new_reqwest_client() -> Result<reqwest::Client> {
+    Ok(reqwest::ClientBuilder::new()
+        // The lab can take a while to hand back results, but 60 seconds should be enough
+        // for anybody.
+        .timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(lab::MAX_CONCURRENCY)
+        .build()?)
+}
+
 async fn publish_forever(
-    client: reqwest::Client,
+    mut client: reqwest::Client,
     notifications: watch::Sender<Option<Arc<BotStatusSnapshot>>>,
 ) {
     let mut ticks = tokio::time::interval(Duration::from_secs(60));
@@ -133,6 +142,15 @@ async fn publish_forever(
         };
 
         if !update_success {
+            match new_reqwest_client() {
+                Ok(x) => {
+                    info!("Reqwest client remake requested; installing new one...");
+                    client = x;
+                }
+                Err(x) => {
+                    error!("Failed making new reqwest client; reusing old: {}", x);
+                }
+            }
             continue;
         }
 
@@ -206,13 +224,8 @@ struct Opts {
 
 fn main() -> Result<()> {
     init_logger_or_die();
+    let client = new_reqwest_client()?;
     let opts = Opts::from_args();
-    let client = reqwest::ClientBuilder::new()
-        // The lab can take a while to hand back results, but 60 seconds should be enough
-        // for anybody.
-        .timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(lab::MAX_CONCURRENCY)
-        .build()?;
     let storage = storage::Storage::from_file(&opts.database)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
