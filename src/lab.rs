@@ -112,10 +112,10 @@ where
             Ok(x) => x,
         };
 
-        return Ok(resp
+        return resp
             .json()
             .await
-            .with_context(|| format!("parsing {}", url))?);
+            .with_context(|| format!("parsing {}", url));
     }
 }
 
@@ -257,7 +257,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
             where
                 E: serde::de::Error,
             {
-                let secs = value as i64;
+                let secs = value;
                 match chrono::NaiveDateTime::from_timestamp_opt(secs, 0) {
                     Some(x) => Ok(RawBuildbotTime(x)),
                     None => Err(E::custom(format!("{} is an invalid timestamp", value))),
@@ -632,7 +632,7 @@ async fn resolve_builder_build_info(
     let most_recent_build = resolve_completed_lab_build(client, &info.most_recent_build).await?;
     let first_failing_build = match &info.first_failing_build {
         None => None,
-        Some(x) => Some(resolve_completed_lab_build(client, &x).await?),
+        Some(x) => Some(resolve_completed_lab_build(client, x).await?),
     };
     Ok(Bot {
         category: determine_bot_category(bot_info)
@@ -840,7 +840,7 @@ async fn perform_incremental_builder_sync(
                 .pending_builds
                 .iter()
                 .cloned()
-                .filter(|x| !fetched_ids.contains(&x)),
+                .filter(|x| !fetched_ids.contains(x)),
             move |id| fetch_build_by_id(client.clone(), id),
         )
         .await?

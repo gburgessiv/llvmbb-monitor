@@ -277,7 +277,7 @@ impl BlamelistCache {
                         // iteration of this loop. If that happens, eh. It's a race anyway.
                     }
                     Entry::Vacant(x) => {
-                        x.insert(storage.find_userids_for(&email)?);
+                        x.insert(storage.find_userids_for(email)?);
                     }
                 }
             }
@@ -295,10 +295,10 @@ impl BlamelistCache {
         let mut emails: Vec<&Email> = Vec::new();
         let mut user_ids: HashSet<UserId> = HashSet::new();
         for email in blamelist {
-            let users_to_ping = self.email_id_mappings.get(&email).unwrap();
+            let users_to_ping = self.email_id_mappings.get(email).unwrap();
             let mut pinged_anyone = false;
             for u in users_to_ping {
-                if guild_members.contains_key(&u) {
+                if guild_members.contains_key(u) {
                     pinged_anyone = true;
                     user_ids.insert(*u);
                 }
@@ -337,7 +337,7 @@ fn url_escape_bot_name(bot_name: &str) -> Cow<'_, str> {
     if !bot_name.contains(' ') {
         Cow::Borrowed(bot_name)
     } else {
-        Cow::Owned(bot_name.replace(" ", "%20"))
+        Cow::Owned(bot_name.replace(' ', "%20"))
     }
 }
 
@@ -379,7 +379,7 @@ impl ChannelServer {
                 }
 
                 self.status_channel
-                    .edit_message(http, prev_data.id, |m| m.content(&*data))
+                    .edit_message(http, prev_data.id, |m| m.content(data))
                     .await?;
 
                 prev_data.last_value = data.to_owned();
@@ -388,7 +388,7 @@ impl ChannelServer {
 
             let discord_message = self
                 .status_channel
-                .send_message(http, |m| m.content(&*data))
+                .send_message(http, |m| m.content(data))
                 .await?;
             existing_messages.push(ServerUIMessage {
                 last_value: data.to_owned(),
@@ -457,7 +457,7 @@ impl ChannelServer {
                         http,
                         &next_breakage.build.blamelist,
                         self.guild,
-                        &*self.storage,
+                        &self.storage,
                     )
                     .await?;
             }
@@ -821,7 +821,7 @@ impl serenity::client::EventHandler for MessageHandler {
             loop {
                 info!("Setting up serving for guild #{}", guild_id);
                 if let Err(x) = server
-                    .serve(&*http, &mut pubsub_reader, &mut should_exit)
+                    .serve(&http, &mut pubsub_reader, &mut should_exit)
                     .await
                 {
                     error!("Failed serving guild #{}: {}", guild_id, x);
@@ -1019,7 +1019,7 @@ fn duration_to_shorthand(dur: chrono::Duration) -> String {
         let d = dur.num_days();
         return format!("{} {}", d, if d == 1 { "day" } else { "days" });
     }
-    return format!("{} weeks", dur.num_weeks());
+    format!("{} weeks", dur.num_weeks())
 }
 
 // Eh.
@@ -1184,10 +1184,7 @@ impl StatusUIUpdater {
         for (category_name, bots) in categorized {
             let mut failed_bots: Vec<_> = bots
                 .iter()
-                .filter_map(|(name, bot)| match &bot.status.first_failing_build {
-                    None => None,
-                    Some(x) => Some((*name, x.id, x.completion_time)),
-                })
+                .filter_map(|(name, bot)| bot.status.first_failing_build.as_ref().map(|x| (*name, x.id, x.completion_time)))
                 .collect();
 
             if failed_bots.is_empty() {
@@ -1294,11 +1291,7 @@ impl UpdateUIUpdater {
             .bots
             .iter()
             .filter_map(|(id, bot)| {
-                if let Some(x) = &bot.status.first_failing_build {
-                    Some((id, x))
-                } else {
-                    None
-                }
+                bot.status.first_failing_build.as_ref().map(|x| (id, x))
             })
             .collect();
 
@@ -1351,8 +1344,8 @@ async fn draw_ui(
 
         looped_before = true;
         pubsub.publish(
-            Arc::new(status_ui.draw_ui_with_snapshot(&*snapshot)),
-            &update_ui.get_updates(&*snapshot),
+            Arc::new(status_ui.draw_ui_with_snapshot(&snapshot)),
+            &update_ui.get_updates(&snapshot),
         );
     }
 }

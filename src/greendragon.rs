@@ -36,10 +36,10 @@ where
         .and_then(|x| x.error_for_status())
         .with_context(|| format!("requesting {}", path))?;
 
-    Ok(resp
+    resp
         .json()
         .await
-        .with_context(|| format!("parsing {}", path))?)
+        .with_context(|| format!("parsing {}", path))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -51,7 +51,7 @@ enum Color {
     Yellow { flashing: bool },
 }
 
-const VALID_COLOR_VALUES: &'static [(&'static str, Color)] = &[
+const VALID_COLOR_VALUES: &[(&str, Color)] = &[
     // All of the aborted builds I can find are colored grey on the UI, so.
     ("aborted", Color::Disabled),
     ("aborted_anime", Color::Disabled),

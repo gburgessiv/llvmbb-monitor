@@ -171,7 +171,7 @@ mod test {
 
         {
             let emails = storage.find_emails_for(id).expect("failed fetching emails");
-            assert_eq!(&emails, &[email.clone()]);
+            assert_eq!(&emails, &[email]);
         }
     }
 
@@ -230,7 +230,7 @@ mod test {
 
         {
             let emails = storage.find_emails_for(id).expect("failed fetching emails");
-            assert_eq!(&emails, &[email.clone()]);
+            assert_eq!(&emails, &[email]);
         }
     }
 
@@ -253,7 +253,7 @@ mod test {
 
         for email in &emails {
             let db_ids = storage
-                .find_userids_for(&email)
+                .find_userids_for(email)
                 .expect("failed fetching userids");
             assert_eq!(&db_ids, &ids);
         }
