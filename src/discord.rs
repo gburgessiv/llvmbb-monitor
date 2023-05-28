@@ -1118,7 +1118,7 @@ impl StatusUIUpdater {
 
             write!(
                 result,
-                "\n- `{}`: {} of {} {} {} broken ({} recent)",
+                "\n\\- `{}`: {} of {} {} {} broken ({} recent)",
                 name,
                 num_red_bots,
                 bots.len(),
@@ -1230,7 +1230,7 @@ impl StatusUIUpdater {
 
                 write!(
                     this_message,
-                    "\n-{} For {}: <{}/{}> (since #{})",
+                    "\n\\-{} For {}: <{}/{}> (since #{})",
                     emoji,
                     time_broken_str,
                     url_prefix,
@@ -1248,7 +1248,7 @@ impl StatusUIUpdater {
         if num_offline > 0 {
             write!(
                 this_message,
-                "\n- {} {} omitted, since {} offline.",
+                "\n\\- {} {} omitted, since {} offline.",
                 num_offline,
                 if num_offline == 1 { "bot" } else { "bots" },
                 if num_offline == 1 { "it's" } else { "they're" },
@@ -1265,7 +1265,7 @@ impl StatusUIUpdater {
 
         write!(
             this_message,
-            "\n- Last build was seen at {} UTC.",
+            "\n\\- Last build was seen at {} UTC.",
             newest_update_time.format("%Y-%m-%d %H:%M:%S")
         )
         .unwrap();
