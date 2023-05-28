@@ -1175,12 +1175,13 @@ impl StatusUIUpdater {
         let mut full_message_text =
             self.draw_main_message_from_categories(&categorized, start_time);
 
-        let mut push_section = |s: String| {
+        let mut push_section = |s: &str| {
             full_message_text += "\n\n";
-            full_message_text += &s;
+            full_message_text += s;
         };
 
         let mut all_failed_bots: Vec<&BotID> = Vec::new();
+        let mut this_message = String::new();
         for (category_name, bots) in categorized {
             let mut failed_bots: Vec<_> = bots
                 .iter()
@@ -1200,7 +1201,7 @@ impl StatusUIUpdater {
             failed_bots.sort_by_key(|&(_, _, first_failed_time)| first_failed_time);
             failed_bots.reverse();
 
-            let mut this_message = String::new();
+            this_message.clear();
             write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
             for (bot_id, first_failed_id, first_failed_time) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
@@ -1239,40 +1240,36 @@ impl StatusUIUpdater {
                 .unwrap();
             }
 
-            push_section(this_message);
+            push_section(&this_message);
         }
 
-        push_section({
-            let mut final_section = String::new();
-
-            final_section += "**Meta:**";
-            if num_offline > 0 {
-                write!(
-                    final_section,
-                    "\n- {} {} omitted, since {} offline.",
-                    num_offline,
-                    if num_offline == 1 { "bot" } else { "bots" },
-                    if num_offline == 1 { "it's" } else { "they're" },
-                )
-                .unwrap()
-            }
-
-            let newest_update_time: chrono::NaiveDateTime = snapshot
-                .bots
-                .values()
-                .map(|bot| bot.status.most_recent_build.completion_time)
-                .max()
-                .unwrap();
-
+        this_message.clear();
+        this_message += "**Meta:**";
+        if num_offline > 0 {
             write!(
-                final_section,
-                "\n- Last build was seen at {} UTC.",
-                newest_update_time.format("%Y-%m-%d %H:%M:%S")
+                this_message,
+                "\n- {} {} omitted, since {} offline.",
+                num_offline,
+                if num_offline == 1 { "bot" } else { "bots" },
+                if num_offline == 1 { "it's" } else { "they're" },
             )
+            .unwrap()
+        }
+
+        let newest_update_time: chrono::NaiveDateTime = snapshot
+            .bots
+            .values()
+            .map(|bot| bot.status.most_recent_build.completion_time)
+            .max()
             .unwrap();
 
-            final_section
-        });
+        write!(
+            this_message,
+            "\n- Last build was seen at {} UTC.",
+            newest_update_time.format("%Y-%m-%d %H:%M:%S")
+        )
+        .unwrap();
+        push_section(&this_message);
 
         UI {
             messages: split_message(full_message_text, DISCORD_MESSAGE_SIZE_LIMIT),
