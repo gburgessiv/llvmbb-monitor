@@ -309,11 +309,11 @@ impl BlamelistCache {
             }
         }
 
-        emails.sort();
+        emails.sort_unstable();
 
         // Invariant: All users in user_ids have an entry in `guild_members`.
         let mut user_ids: Vec<_> = user_ids.into_iter().collect();
-        user_ids.sort_by_key(|x| (guild_members.get(x).unwrap(), *x));
+        user_ids.sort_unstable_by_key(|x| (guild_members.get(x).unwrap(), *x));
 
         let to_blame = user_ids
             .into_iter()
@@ -557,7 +557,7 @@ impl ChannelServer {
 
         // Don't assume any order on the message IDs we received (they're generally new -> old per
         // batch, but we're getting batches in the order oldest -> newest, so ...)
-        existing_messages.sort_by_key(|x| x.id);
+        existing_messages.sort_unstable_by_key(|x| x.id);
         let mut current_ui: Arc<UI> = match self.ui.as_ref() {
             None => {
                 let messages: &[&str] = &[concat!(
@@ -674,7 +674,7 @@ impl MessageHandler {
         }
 
         let mut result_str = "Email(s) associated with your account: ".to_string();
-        emails.sort();
+        emails.sort_unstable();
         for (i, e) in emails.into_iter().enumerate() {
             if i != 0 {
                 result_str += ", ";
@@ -1050,16 +1050,16 @@ impl StatusUIUpdater {
 
         let mut result: Vec<_> = categories
             .into_iter()
-            .map(|x| {
-                let mut val: Vec<_> = x.1.into_iter().collect();
-                val.sort_by_key(|x| x.0);
-                (x.0, val)
+            .map(|(category, bots)| {
+                let mut bots_list: Vec<_> = bots.into_iter().collect();
+                bots_list.sort_unstable_by_key(|x| x.0);
+                (category, bots_list)
             })
             .collect();
 
         assert!(result.iter().all(|x| !x.1.is_empty()));
 
-        result.sort_by_key(|x| x.0);
+        result.sort_unstable_by_key(|x| x.0);
         (result, skipped)
     }
 

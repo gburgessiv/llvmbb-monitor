@@ -215,7 +215,7 @@ async fn fetch_single_bot_status_snapshot(
     let status: RawBotStatus = {
         let mut status: RawBotStatus =
             json_get(client, &format!("/green/view/All/job/{}/api/json", name)).await?;
-        status.builds.sort_by_key(|x| x.number);
+        status.builds.sort_unstable_by_key(|x| x.number);
         status
     };
 

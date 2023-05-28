@@ -728,7 +728,7 @@ async fn perform_initial_builder_sync(
             .iter()
             .map(|(_, (name, _))| name)
             .collect::<Vec<_>>();
-        x.sort();
+        x.sort_unstable();
         x
     });
 
@@ -913,7 +913,7 @@ async fn perform_incremental_builder_sync(
 
     // For a given bot, we rely on earlier position in this vec == older sources in the build. We
     // don't care about the order of unrelated bots' builds.
-    publishable_completed_builds.sort_by_key(|x| x.local_build_id);
+    publishable_completed_builds.sort_unstable_by_key(|x| x.local_build_id);
 
     let resolved_newly_completed_builds: Vec<(BotID, CompletedBuild)> = {
         let client = client.clone();
