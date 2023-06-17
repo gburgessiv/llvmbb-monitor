@@ -532,7 +532,7 @@ async fn fetch_build_blamelist(
     // Some emails aren't trivially machine-parseable (e.g. "foo bar <x at y dot com>"). Don't even
     // try to deal with those.
 
-    Ok(results
+    let mut rs: Vec<Email> = results
         .into_iter()
         .filter_map(|x| match Email::parse(remove_name_from_email(&x.author)) {
             Some(x) => Some(x),
@@ -541,7 +541,13 @@ async fn fetch_build_blamelist(
                 None
             }
         })
-        .collect())
+        .collect();
+
+    // For some reason, we sometimes get duplicate emails. Sort because things are prettier that
+    // way, then dedup to squish the duplicate issue.
+    rs.sort_unstable();
+    rs.dedup();
+    Ok(rs)
 }
 
 async fn resolve_completed_lab_build<T: std::borrow::Borrow<reqwest::Client>>(
