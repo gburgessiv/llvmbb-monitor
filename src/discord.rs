@@ -746,14 +746,11 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         }
 
-        let find_channel_id = |name: &str| match guild
-            .channels
-            .iter()
-            .filter(|x| x.1.name == name)
-            .map(|x| x.0)
-            .next()
-        {
-            Some(x) => {
+        let find_channel_id = |name: &str| match guild.channels.iter().find(|x| match &x.1 {
+            Channel::Guild(c) => c.name == name,
+            _ => false,
+        }) {
+            Some((x, _)) => {
                 info!("Identified #{} as my channel in #{}", x, guild_id);
                 Some(*x)
             }
@@ -773,7 +770,7 @@ impl serenity::client::EventHandler for MessageHandler {
             None => return,
         };
 
-        let bot_user_id = ctx.cache.current_user_id().await;
+        let bot_user_id = ctx.cache.current_user_id();
         let http = ctx.http;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
@@ -848,7 +845,7 @@ impl serenity::client::EventHandler for MessageHandler {
     async fn guild_delete(
         &self,
         _ctx: Context,
-        incomplete_guild: GuildUnavailable,
+        incomplete_guild: UnavailableGuild,
         _full_data: Option<Guild>,
     ) {
         info!("Guild #{} has been deleted", incomplete_guild.id);
@@ -1360,8 +1357,9 @@ pub(crate) fn run(
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
     let storage = Arc::new(Mutex::new(storage));
     runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
+    let intents = GatewayIntents::GUILDS;
     runtime.block_on(async move {
-        serenity::Client::builder(token)
+        serenity::Client::builder(token, intents)
             .event_handler(MessageHandler {
                 ui_broadcaster,
                 servers: Default::default(),
