@@ -8,11 +8,11 @@ use rusqlite::params;
 use serenity::model::prelude::UserId;
 
 fn userid_to_db(uid: UserId) -> i64 {
-    uid.0 as i64
+    uid.get() as i64
 }
 
 fn db_to_userid(uid: i64) -> UserId {
-    UserId(uid as u64)
+    UserId::new(uid as u64)
 }
 
 pub(crate) struct Storage {

@@ -12,7 +12,8 @@ use anyhow::Result;
 use futures::StreamExt;
 use log::{error, info, warn};
 use serenity::async_trait;
-use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serenity::builder;
+use serenity::gateway;
 use serenity::http::Http;
 use serenity::model::prelude::*;
 use serenity::prelude::*;
@@ -379,7 +380,11 @@ impl ChannelServer {
                 }
 
                 self.status_channel
-                    .edit_message(http, prev_data.id, |m| m.content(data))
+                    .edit_message(
+                        http,
+                        prev_data.id,
+                        builder::EditMessage::new().content(data),
+                    )
                     .await?;
 
                 prev_data.last_value = data.to_owned();
@@ -388,7 +393,7 @@ impl ChannelServer {
 
             let discord_message = self
                 .status_channel
-                .send_message(http, |m| m.content(data))
+                .send_message(http, builder::CreateMessage::new().content(data))
                 .await?;
             existing_messages.push(ServerUIMessage {
                 last_value: data.to_owned(),
@@ -469,7 +474,7 @@ impl ChannelServer {
                 // On the bright side, `split_message` shouldn't do that like 99.99% of the time. I
                 // hope. 2K chars is a lot, fam.
                 self.updates_channel
-                    .send_message(http, |m| m.content(msg))
+                    .send_message(http, builder::CreateMessage::new().content(msg))
                     .await?;
             }
 
@@ -490,14 +495,17 @@ impl ChannelServer {
         info!("Removing existing messages in {}", self.status_channel);
 
         let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
-        let mut most_recent_id = MessageId(0);
+        let mut most_recent_id = MessageId::new(1);
         loop {
             let max_messages = 50;
             let messages = self
                 .status_channel
-                .messages(http, |retriever| {
-                    retriever.after(most_recent_id).limit(max_messages)
-                })
+                .messages(
+                    http,
+                    builder::GetMessages::new()
+                        .after(most_recent_id)
+                        .limit(max_messages),
+                )
                 .await?;
 
             if messages.is_empty() {
@@ -721,7 +729,7 @@ impl MessageHandler {
 
 #[async_trait]
 impl serenity::client::EventHandler for MessageHandler {
-    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
+    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
         info!("Guild #{} ({}) has been created", guild.id, guild.name);
 
         let guild_id = guild.id;
@@ -746,10 +754,8 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         }
 
-        let find_channel_id = |name: &str| match guild.channels.iter().find(|x| match &x.1 {
-            Channel::Guild(c) => c.name == name,
-            _ => false,
-        }) {
+        let find_channel_id = |name: &str| match guild.channels.iter().find(|(_, x)| x.name == name)
+        {
             Some((x, _)) => {
                 info!("Identified #{} as my channel in #{}", x, guild_id);
                 Some(*x)
@@ -770,7 +776,7 @@ impl serenity::client::EventHandler for MessageHandler {
             None => return,
         };
 
-        let bot_user_id = ctx.cache.current_user_id();
+        let bot_user_id = ctx.cache.current_user().id;
         let http = ctx.http;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let guild_state = self.servers.clone();
@@ -852,20 +858,20 @@ impl serenity::client::EventHandler for MessageHandler {
         self.decref_guild_server(incomplete_guild.id);
     }
 
-    async fn guild_unavailable(&self, _ctx: Context, guild_id: GuildId) {
-        warn!("Guild #{} is now unavailable", guild_id);
-        self.decref_guild_server(guild_id);
-    }
-
-    async fn shard_stage_update(&self, ctx: Context, event: ShardStageUpdateEvent) {
-        if event.new == serenity::gateway::ConnectionStage::Connected {
+    async fn shard_stage_update(
+        &self,
+        ctx: Context,
+        event: serenity::gateway::ShardStageUpdateEvent,
+    ) {
+        if event.new == gateway::ConnectionStage::Connected {
             info!("New shard connection established");
-            ctx.set_activity(Activity::playing(self.bot_version)).await;
+            ctx.set_activity(Some(gateway::ActivityData::playing(self.bot_version)));
         }
     }
 
     async fn message(&self, ctx: Context, message: Message) {
-        if !message.is_private() || message.author.bot {
+        // DMs only.
+        if message.guild_id.is_some() || message.author.bot {
             return;
         }
 
@@ -904,7 +910,7 @@ impl serenity::client::EventHandler for MessageHandler {
         for msg in split_message(response, DISCORD_MESSAGE_SIZE_LIMIT) {
             if let Err(x) = message
                 .author
-                .direct_message(&ctx, |m| m.content(msg))
+                .direct_message(&ctx, builder::CreateMessage::new().content(msg))
                 .await
             {
                 error!("Failed to respond to user message: {}", x);
