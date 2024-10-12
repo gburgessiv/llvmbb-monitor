@@ -883,7 +883,7 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("list-emails") => Some(self.handle_list_emails(from_uid)),
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
             Some(_) | None => {
-                info!("{:?}", content);
+                info!("Received a DM-ish message; not sure what to do with it: {:?}", content);
                 None
             }
         };
@@ -1366,7 +1366,7 @@ pub(crate) fn run(
     let ui_broadcaster = Arc::new(UIBroadcaster::default());
     let storage = Arc::new(Mutex::new(storage));
     runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
-    let intents = GatewayIntents::GUILDS;
+    let intents = GatewayIntents::DIRECT_MESSAGES | GatewayIntents::GUILDS;
     runtime.block_on(async move {
         serenity::Client::builder(token, intents)
             .event_handler(MessageHandler {
