@@ -876,7 +876,10 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("add-email") => Some(self.handle_add_email(from_uid, content_fields.next())),
             Some("list-emails") => Some(self.handle_list_emails(from_uid)),
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
-            Some(_) | None => None,
+            Some(_) | None => {
+                info!("{:?}", content);
+                None
+            }
         };
 
         let default_content = concat!(

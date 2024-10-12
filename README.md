@@ -36,7 +36,35 @@ while you're here. :)
 
 ## Running the bot
 
-`DISCORD_TOKEN=foo ./run.py` is what I use to run the bot on my server. It's
+### The way that is both new and shiny
+
+Running `docker build -t llvm_buildbot_monitor .` in this directory will produce
+a docker image that gets you the majority of the way there.
+
+The only thing missing is credentials and database info, which are both
+specified during `docker run`. My `docker run` command looks something like:
+
+```
+docker run \
+  --rm \
+  --env DISCORD_TOKEN="${MY_DISCORD_TOKEN}" \
+  -v "${PATH_TO_DIR_CONTAINING_DB_FILE}:/db"
+  -v "${HOME}/llvmbb_logs:/logs"
+  --it \
+  --init \
+  llvm_buildbot_monitor
+```
+
+Notes:
+  - The default db file is called `db.sqlite3`. I store it in db/ within
+    this repo (though it's gitignore'd).
+  - The /logs volume is optional. If it's specified, the default container
+    output will be minimal, instead being redirected to log files. If not
+    specified, output will go to stdout/stderr.
+
+### The old way
+
+`DISCORD_TOKEN=foo ./run.py` is what I used to run the bot on my server. It's
 sorta awkward to hold, since that script is part of this repo, yet it syncs the
 bot to somewhere under `~/llvmbb_monitor/`.
 
