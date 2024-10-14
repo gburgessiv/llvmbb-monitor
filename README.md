@@ -51,7 +51,6 @@ docker run \
   -v "${PATH_TO_DIR_CONTAINING_DB_FILE}:/db"
   -v "${HOME}/llvmbb_logs:/logs"
   --it \
-  --init \
   llvm_buildbot_monitor
 ```
 

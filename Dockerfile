@@ -29,7 +29,7 @@ ENV PATH="$PATH:/home/llvmbb_monitor/.cargo/bin"
 # such do incremental builds.
 # TODO: Is the `cargo vendor` necessary? Feels bad to use it to just populate
 # .cargo's cache.
-COPY Cargo.lock Cargo.toml .
+COPY Cargo.lock Cargo.toml ./
 RUN \
   mkdir code && \
   mv Cargo.lock Cargo.toml code && \
