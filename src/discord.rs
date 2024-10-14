@@ -1035,7 +1035,7 @@ fn is_duration_recentish(dur: chrono::Duration) -> bool {
 
 type NamedBot<'a> = (&'a BotID, &'a Bot);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct StatusUIUpdater;
 
 impl StatusUIUpdater {
@@ -1072,7 +1072,7 @@ impl StatusUIUpdater {
     fn draw_main_message_from_categories(
         &mut self,
         categories: &[(&str, Vec<(&BotID, &Bot)>)],
-        now: chrono::NaiveDateTime,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> String {
         assert!(!categories.is_empty());
 
@@ -1177,7 +1177,7 @@ impl StatusUIUpdater {
             };
         }
 
-        let start_time = chrono::Utc::now().naive_utc();
+        let start_time = chrono::Utc::now();
         let mut full_message_text =
             self.draw_main_message_from_categories(&categorized, start_time);
 
@@ -1262,7 +1262,7 @@ impl StatusUIUpdater {
             .unwrap()
         }
 
-        let newest_update_time: chrono::NaiveDateTime = snapshot
+        let newest_update_time: chrono::DateTime<chrono::Utc> = snapshot
             .bots
             .values()
             .map(|bot| bot.status.most_recent_build.completion_time)
@@ -1329,7 +1329,7 @@ async fn draw_ui(
     pubsub: Arc<UIBroadcaster>,
 ) {
     let mut looped_before = false;
-    let mut status_ui = StatusUIUpdater::default();
+    let mut status_ui = StatusUIUpdater;
     let mut update_ui = UpdateUIUpdater::default();
 
     loop {

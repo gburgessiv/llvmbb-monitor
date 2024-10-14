@@ -366,11 +366,11 @@ impl<'de> Deserialize<'de> for RawBuildResult {
 struct RawBuildbotTime(f64);
 
 impl RawBuildbotTime {
-    fn as_datetime(self) -> Result<chrono::NaiveDateTime> {
+    fn as_datetime(self) -> Result<chrono::DateTime<chrono::Utc>> {
         let millis = self.0 as i64;
         let secs = millis / 1000;
         let nanos = ((millis % 1000) * 1_000_000) as u32;
-        match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
+        match chrono::DateTime::from_timestamp(secs, nanos) {
             Some(x) => Ok(x),
             None => bail!("invalid timestamp: {}", self.0),
         }

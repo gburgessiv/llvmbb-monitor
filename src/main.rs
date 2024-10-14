@@ -59,7 +59,7 @@ impl Email {
 struct CompletedBuild {
     id: BuildNumber,
     status: BuildbotResult,
-    completion_time: chrono::NaiveDateTime,
+    completion_time: chrono::DateTime<chrono::Utc>,
     // This is 'blame' in the same way that 'git blame' is 'blame': it's the set of authors who
     // have changes in the current build.
     blamelist: Box<[Email]>,

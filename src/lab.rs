@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use chrono::TimeZone;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -214,7 +213,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
 }
 
 #[derive(Copy, Clone, Debug)]
-struct RawBuildbotTime(chrono::NaiveDateTime);
+struct RawBuildbotTime(chrono::DateTime<chrono::Utc>);
 
 impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
     fn deserialize<D>(deserializer: D) -> Result<RawBuildbotTime, D::Error>
@@ -236,7 +235,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
             {
                 let secs = value as i64;
                 let nanos = ((value - secs as f64) * 1_000_000_000f64) as u32;
-                match chrono::NaiveDateTime::from_timestamp_opt(secs, nanos) {
+                match chrono::DateTime::from_timestamp(secs, nanos) {
                     Some(x) => Ok(RawBuildbotTime(x)),
                     None => Err(E::custom(format!("{} is an invalid timestamp", value))),
                 }
@@ -258,7 +257,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
                 E: serde::de::Error,
             {
                 let secs = value;
-                match chrono::NaiveDateTime::from_timestamp_opt(secs, 0) {
+                match chrono::DateTime::from_timestamp(secs, 0) {
                     Some(x) => Ok(RawBuildbotTime(x)),
                     None => Err(E::custom(format!("{} is an invalid timestamp", value))),
                 }
@@ -273,7 +272,7 @@ struct CompletedLabBuild {
     builder_id: BotID,
     build_id: GlobalBuildNumber,
     local_build_id: LocalBuildNumber,
-    complete_at: chrono::NaiveDateTime,
+    complete_at: chrono::DateTime<chrono::Utc>,
     result: BuildbotResult,
 }
 
@@ -689,7 +688,7 @@ async fn perform_initial_builder_sync(
         .max()
         .ok_or_else(|| anyhow!("no builds found"))?;
 
-    let drop_builder_if_before = chrono::Utc::now().naive_utc() - max_builder_build_age();
+    let drop_builder_if_before = chrono::Utc::now() - max_builder_build_age();
     let resolved_builds: Vec<(BotID, (String, Bot))> = {
         let client = client.clone();
         concurrent_map_early_exit(
@@ -708,8 +707,7 @@ async fn perform_initial_builder_sync(
                         {
                             info!(
                                 "Dropping {:?}; its most recent build is too old (completed at {})",
-                                bot_info.name,
-                                chrono::Utc.from_utc_datetime(&x.most_recent_build.complete_at)
+                                bot_info.name, x.most_recent_build.complete_at,
                             );
                             None
                         } else {
@@ -1002,14 +1000,13 @@ async fn perform_incremental_builder_sync(
     // miss that, rather than a correctness issue (since the loop that constructs `new_results`
     // will full-sync unknown bots.
     {
-        let drop_builder_if_before = chrono::Utc::now().naive_utc() - max_builder_build_age();
+        let drop_builder_if_before = chrono::Utc::now() - max_builder_build_age();
         new_results.retain(|name, bot| {
             let completion_time = &bot.1.status.most_recent_build.completion_time;
             if *completion_time < drop_builder_if_before {
                 info!(
                     "Dropping {:?}; its most recent build is too old (completed at {})",
-                    name,
-                    chrono::Utc.from_utc_datetime(completion_time)
+                    name, completion_time
                 );
                 false
             } else {
