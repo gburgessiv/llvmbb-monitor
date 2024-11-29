@@ -1,5 +1,10 @@
 #!/bin/bash -eu
 
+if [[ -z "${DISCORD_TOKEN:-}" ]]; then
+  echo "Set DISCORD_TOKEN=" >&2
+  exit 1
+fi
+
 exec_mon() {
   ./llvm_buildbot_monitor \
     --discord-token="${DISCORD_TOKEN}" \
