@@ -30,10 +30,13 @@ ENV PATH="$PATH:/home/llvmbb_monitor/.cargo/bin"
 # TODO: Is the `cargo vendor` necessary? Feels bad to use it to just populate
 # .cargo's cache.
 COPY --chown=llvmbb_monitor:llvmbb_monitor Cargo.lock Cargo.toml code/
+COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/Cargo.toml code/calendar_check/Cargo.toml
 COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/Cargo.toml code/llvm_buildbot_monitor/Cargo.toml
 RUN \
+  mkdir -p code/calendar_check/src && \
   mkdir -p code/llvm_buildbot_monitor/src && \
   cd code && \
+  echo 'fn main() {}' > calendar_check/src/main.rs && \
   echo 'fn main() {}' > llvm_buildbot_monitor/src/main.rs && \
   cargo vendor && \
   rm -rf vendor
@@ -60,12 +63,14 @@ FROM build-baseline AS build
 RUN \
   cd code && \
   cargo build --release --offline --locked && \
+  cargo clean -r -p calendar_check && \
   cargo clean -r -p llvm_buildbot_monitor
 
 # Bring in sources & test go brrr.
-COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/
+COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/ code/calendar_check/
+COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/llvm_buildbot_monitor/
 COPY --chown=llvmbb_monitor:llvmbb_monitor .git/ code/.git
-RUN cd code && cargo build --release
+RUN cd code && cargo build --release --workspace
 
 # Now build the actual image.
 FROM debian:stable-slim
@@ -88,7 +93,8 @@ WORKDIR /home/llvmbb_monitor
 
 COPY --chmod=555 docker/run_buildbot_monitor.sh .
 COPY --from=build \
+  /home/llvmbb_monitor/code/target/release/calendar_check \
   /home/llvmbb_monitor/code/target/release/llvm_buildbot_monitor \
-  llvm_buildbot_monitor
+  llvm_buildbot_monitor/
 
 CMD ["bash", "-eu", "run_buildbot_monitor.sh"]
