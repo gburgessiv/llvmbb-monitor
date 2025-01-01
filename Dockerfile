@@ -29,13 +29,12 @@ ENV PATH="$PATH:/home/llvmbb_monitor/.cargo/bin"
 # such do incremental builds.
 # TODO: Is the `cargo vendor` necessary? Feels bad to use it to just populate
 # .cargo's cache.
-COPY Cargo.lock Cargo.toml ./
+COPY --chown=llvmbb_monitor:llvmbb_monitor Cargo.lock Cargo.toml code/
+COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/Cargo.toml code/llvm_buildbot_monitor/Cargo.toml
 RUN \
-  mkdir code && \
-  mv Cargo.lock Cargo.toml code && \
+  mkdir -p code/llvm_buildbot_monitor/src && \
   cd code && \
-  mkdir src && \
-  echo 'fn main() {}' > src/main.rs && \
+  echo 'fn main() {}' > llvm_buildbot_monitor/src/main.rs && \
   cargo vendor && \
   rm -rf vendor
 
@@ -47,11 +46,10 @@ FROM build-baseline AS test-container
 RUN \
   cd code && \
   cargo build --offline --locked && \
-  cargo clean -p llvm_buildbot_monitor
+  cargo clean
 
 # Bring in sources & test go brrr.
-COPY --chown=llvmbb_monitor:llvmbb_monitor src code/src
-COPY --chown=llvmbb_monitor:llvmbb_monitor .git code/.git
+COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor .git/ code/
 RUN cd code && cargo test
 
 # Release build container.
@@ -65,8 +63,8 @@ RUN \
   cargo clean -r -p llvm_buildbot_monitor
 
 # Bring in sources & test go brrr.
-COPY --chown=llvmbb_monitor:llvmbb_monitor src code/src
-COPY --chown=llvmbb_monitor:llvmbb_monitor .git code/.git
+COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/
+COPY --chown=llvmbb_monitor:llvmbb_monitor .git/ code/.git
 RUN cd code && cargo build --release
 
 # Now build the actual image.
@@ -83,7 +81,7 @@ RUN apt-get install -y \
 RUN \
   groupadd -g 1000 llvmbb_monitor && \
   useradd -u 1000 -g 1000 llvmbb_monitor -s /bin/bash -d /home/llvmbb_monitor && \
-  mkdir /home/llvmbb_monitor /db && \
+  mkdir -p /home/llvmbb_monitor/llvm_buildbot_monitor /db && \
   chown -R llvmbb_monitor:llvmbb_monitor /home/llvmbb_monitor /db
 USER 1000:1000
 WORKDIR /home/llvmbb_monitor
