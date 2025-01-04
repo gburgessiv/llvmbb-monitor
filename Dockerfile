@@ -93,7 +93,6 @@ WORKDIR /home/llvmbb_monitor
 
 COPY --chmod=555 docker/run_buildbot_monitor.sh .
 COPY --from=build \
-  /home/llvmbb_monitor/code/target/release/calendar_check \
   /home/llvmbb_monitor/code/target/release/llvm_buildbot_monitor \
   llvm_buildbot_monitor/
 

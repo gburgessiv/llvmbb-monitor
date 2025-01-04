@@ -39,6 +39,9 @@ impl Storage {
             "    ON email_mappings(user_id);",
             "CREATE INDEX IF NOT EXISTS email_mappings_email_index",
             "    ON email_mappings(email);",
+            "CREATE TABLE IF NOT EXISTS sent_calendar_pings(",
+            "    event_id TEXT NOT NULL PRIMARY KEY",
+            ");",
         ))?;
 
         // Arbitrary busy handler, but should be good enough, especially given that we only ever
@@ -116,6 +119,38 @@ impl Storage {
             params![userid_to_db(id), email.address()],
         )?;
         Ok(num_deleted != 0)
+    }
+
+    pub(crate) fn add_sent_calendar_ping(&self, calendar_event_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO sent_calendar_pings (event_id) VALUES (?)",
+            params![calendar_event_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn load_all_sent_calendar_pings(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT event_id FROM sent_calendar_pings")?;
+        let iter = stmt.query_map(params![], |row| {
+            let val: String = row.get(0)?;
+            Ok(val)
+        })?;
+
+        let mut result = Vec::new();
+        for elem in iter {
+            result.push(elem?);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn remove_sent_calendar_ping(&self, calendar_event_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sent_calendar_pings WHERE event_id = ?",
+            params![calendar_event_id],
+        )?;
+        Ok(())
     }
 }
 
@@ -264,5 +299,21 @@ mod test {
                 .expect("failed fetching emails");
             assert_eq!(&db_emails, &emails);
         }
+    }
+
+    #[test]
+    fn test_calendar_ping_id_operations() {
+        let ids = ["a", "b", "c"];
+
+        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        assert!(storage.load_all_sent_calendar_pings().unwrap().is_empty());
+
+        for id in ids {
+            storage.add_sent_calendar_ping(id).unwrap();
+        }
+        assert_eq!(&storage.load_all_sent_calendar_pings().unwrap(), &ids);
+
+        storage.remove_sent_calendar_ping(ids[0]).unwrap();
+        assert_eq!(&storage.load_all_sent_calendar_pings().unwrap(), &ids[1..]);
     }
 }
