@@ -4,9 +4,8 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context, Result};
 use calendar_check::CommunityEvent;
 use chrono::{DateTime, Utc};
-use log::{error, info};
-use serenity::model::event;
-use tokio::sync::watch;
+use log::{error, info, warn};
+use tokio::sync::{broadcast, watch};
 
 use crate::storage::Storage;
 
@@ -111,33 +110,41 @@ fn load_and_gc_previous_calendar_pings(
     result
 }
 
-async fn run_discord_ping_impl(event: &CommunityEvent) -> Result<()> {
-    todo!();
-}
-
-async fn run_discord_pings(
-    state: Arc<State>,
-    ping_indices: Vec<usize>,
-    storage: Arc<Mutex<Storage>>,
+fn run_discord_pings(
+    state: &Arc<State>,
+    ping_indices: &[usize],
+    storage: &Arc<Mutex<Storage>>,
+    discord_messages: &broadcast::Sender<CommunityEvent>,
 ) {
-    let events_to_ping = ping_indices.into_iter().map(|i| (i, &state.events[i]));
+    let events_to_ping = ping_indices.into_iter().map(|&i| (i, &state.events[i]));
+    let mut successful_pings = Vec::new();
     for (i, event) in events_to_ping {
-        if let Err(x) = run_discord_ping_impl(event).await {
-            error!("Failed sending calendar ping for event {:?}: {x}", event.id);
+        if discord_messages.send(event.clone()).is_err() {
+            warn!(
+                "Can't send calendar ping for event {:?}; no receivers of the message exist",
+                event.id
+            );
             continue;
         }
+        successful_pings.push(i);
+    }
 
-        let state = state.clone();
-        let storage = storage.clone();
-        // Just drop this on the floor, under the expectation that it'll
-        // complete soon enough anyway.
-        let _ = tokio::task::spawn_blocking(move || {
+    if successful_pings.is_empty() {
+        return;
+    }
+
+    let state = state.clone();
+    let storage = storage.clone();
+    // Just drop this on the floor, under the expectation that it'll
+    // complete soon enough anyway.
+    let _ = tokio::task::spawn_blocking(move || {
+        for i in successful_pings {
             let id = state.events[i].id.as_ref();
             if let Err(x) = storage.lock().unwrap().add_sent_calendar_ping(id) {
                 error!("Failed adding sent calendar ping to storage: {x}");
             }
-        });
-    }
+        }
+    });
 }
 
 fn calculate_event_ping_data(
@@ -178,6 +185,7 @@ fn calculate_event_ping_data(
 async fn run_discord_integration_forever(
     storage: Arc<Mutex<Storage>>,
     mut state_receiver: watch::Receiver<Arc<State>>,
+    discord_messages: broadcast::Sender<CommunityEvent>,
 ) {
     let mut already_pinged = {
         let storage = storage.clone();
@@ -192,6 +200,7 @@ async fn run_discord_integration_forever(
         let now = Utc::now();
         let (ping_now_indices, nearest_unfired_ping) =
             calculate_event_ping_data(&events, &now, &already_pinged);
+
         if !ping_now_indices.is_empty() {
             // While this hasn't been pinged _yet_, it will be very shortly
             // by the following `spawn`. Note this can't be done in the loop
@@ -200,7 +209,7 @@ async fn run_discord_integration_forever(
             for &i in &ping_now_indices {
                 already_pinged.insert(events.events[i].id.clone());
             }
-            tokio::spawn(run_discord_pings(events, ping_now_indices, storage.clone()));
+            run_discord_pings(&events, &ping_now_indices, &storage, &discord_messages);
         }
 
         match nearest_unfired_ping {
@@ -252,7 +261,10 @@ fn calculate_next_refresh_time(state: &State) -> DateTime<Utc> {
     }
 }
 
-pub(crate) async fn run_calendar_forever(storage: Arc<Mutex<Storage>>) {
+pub(crate) async fn run_calendar_forever(
+    storage: Arc<Mutex<Storage>>,
+    discord_messages: broadcast::Sender<CommunityEvent>,
+) {
     // N.B., this is Arc<> because `watch` has internal sync locking. The
     // discord integration may want to hold a borrow() for a while, which
     // could get spicy. Skip the spice by using a cheaply-cloneable type.
@@ -261,6 +273,7 @@ pub(crate) async fn run_calendar_forever(storage: Arc<Mutex<Storage>>) {
     tokio::spawn(run_discord_integration_forever(
         storage.clone(),
         state_receiver,
+        discord_messages,
     ));
     loop {
         // N.B., This is the only sender, so a simple `.borrow()` here instead of
@@ -277,6 +290,7 @@ pub(crate) async fn run_calendar_forever(storage: Arc<Mutex<Storage>>) {
         }
 
         let new_state = load_state_with_retry().await;
+        info!("Calendar refresh successfully loaded {:?} events", new_state.events.len());
         // The receiver is meant to also run forever. Something really bad
         // happened if it died. Probably best to just crash the program at that
         // point, honestly.

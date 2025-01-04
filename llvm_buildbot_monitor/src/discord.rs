@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use calendar_check::CommunityEvent;
 use futures::StreamExt;
 use log::{error, info, warn};
 use serenity::async_trait;
@@ -19,7 +20,7 @@ use serenity::http::Http;
 use serenity::model::prelude::*;
 use serenity::prelude::*;
 use tokio::runtime::Runtime;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 // TODO:
 // ## Include broken stage names in #buildbot-updates (?)
@@ -601,6 +602,7 @@ struct MessageHandler {
     servers: Arc<Mutex<GuildServerState>>,
     bot_version: &'static str,
     storage: Arc<Mutex<Storage>>,
+    community_event_sender: broadcast::Sender<CommunityEvent>,
 }
 
 fn append_discord_safe_email(targ: &mut String, email: &Email) {
@@ -884,7 +886,10 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("list-emails") => Some(self.handle_list_emails(from_uid)),
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
             Some(_) | None => {
-                info!("Received a DM-ish message; not sure what to do with it: {:?}", content);
+                info!(
+                    "Received a DM-ish message; not sure what to do with it: {:?}",
+                    content
+                );
                 None
             }
         };
@@ -1368,6 +1373,14 @@ pub(crate) fn run(
     let storage = Arc::new(Mutex::new(storage));
     runtime.spawn(draw_ui(snapshots, ui_broadcaster.clone()));
     let intents = GatewayIntents::DIRECT_MESSAGES | GatewayIntents::GUILDS;
+
+    // 25 is probably a way overestimate here, but who cares.
+    let (community_event_sender, _) = broadcast::channel(25);
+    runtime.spawn(super::calendar_events::run_calendar_forever(
+        storage.clone(),
+        community_event_sender.clone(),
+    ));
+
     runtime.block_on(async move {
         serenity::Client::builder(token, intents)
             .event_handler(MessageHandler {
@@ -1375,6 +1388,7 @@ pub(crate) fn run(
                 servers: Default::default(),
                 bot_version,
                 storage,
+                community_event_sender,
             })
             .await?
             .start()

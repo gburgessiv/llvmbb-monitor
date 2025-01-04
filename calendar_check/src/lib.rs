@@ -16,14 +16,14 @@ fn utc_time_to_api_time(time: &UtcTime) -> String {
     time.to_rfc3339_opts(chrono::SecondsFormat::Secs, use_z)
 }
 
-#[derive(Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub enum CommunityEventType {
     #[default]
     OfficeHours,
     SyncUp,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CommunityEventDescriptionData {
     pub event_type: CommunityEventType,
     pub mention_users: Vec<Box<str>>,
@@ -31,7 +31,7 @@ pub struct CommunityEventDescriptionData {
     pub ping_duration_before_start_mins: Option<u32>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CommunityEvent {
     // Unix millis.
     pub start_time: UtcTime,

@@ -6,7 +6,7 @@ if [[ -z "${DISCORD_TOKEN:-}" ]]; then
 fi
 
 exec_mon() {
-  ./llvm_buildbot_monitor \
+  ./llvm_buildbot_monitor/llvm_buildbot_monitor \
     --discord-token="${DISCORD_TOKEN}" \
     --database=/db/db.sqlite3
 }
