@@ -1129,6 +1129,7 @@ name = "llvm_buildbot_monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "calendar_check",
  "chrono",
  "clap 3.2.25",
  "futures",

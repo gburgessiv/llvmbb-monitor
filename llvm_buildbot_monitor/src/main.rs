@@ -7,6 +7,7 @@ use log::{error, info, warn};
 use structopt::StructOpt;
 use tokio::sync::watch;
 
+mod calendar_events;
 mod discord;
 mod greendragon;
 mod lab;
