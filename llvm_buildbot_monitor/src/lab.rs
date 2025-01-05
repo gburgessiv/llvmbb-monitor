@@ -169,7 +169,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
     {
         struct Visitor;
 
-        impl<'de2> serde::de::Visitor<'de2> for Visitor {
+        impl serde::de::Visitor<'_> for Visitor {
             type Value = RawBuildbotResult;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -222,7 +222,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
     {
         struct Visitor;
 
-        impl<'de2> serde::de::Visitor<'de2> for Visitor {
+        impl serde::de::Visitor<'_> for Visitor {
             type Value = RawBuildbotTime;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -617,7 +617,7 @@ fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
 
     let best_index = bot_info
         .name
-        .split(|c| c == '_' || c == '-')
+        .split(['_', '-'])
         .filter_map(|piece| {
             known_categories
                 .iter()

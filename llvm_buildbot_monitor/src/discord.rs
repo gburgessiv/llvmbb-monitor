@@ -258,8 +258,7 @@ fn build_community_event_announce_message(event: &CommunityEvent) -> String {
         } else {
             result += ", ";
         }
-        // Note that `user` will have a leading '@'.
-        write!(&mut result, "<{}>", user).unwrap();
+        write!(&mut result, "<@{}>", user).unwrap();
     }
     return result;
 
@@ -1729,7 +1728,7 @@ mod test {
             title: "baz!".into(),
             event_link: "http://link".into(),
             description_data: calendar_check::CommunityEventDescriptionData {
-                mention_users: vec!["@foo".into(), "@bar".into()],
+                mention_users: vec!["foo".into(), "bar".into()],
                 ..Default::default()
             },
             ..Default::default()

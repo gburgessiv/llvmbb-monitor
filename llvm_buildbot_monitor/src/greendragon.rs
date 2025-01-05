@@ -66,7 +66,7 @@ const VALID_COLOR_VALUES: &[(&str, Color)] = &[
 
 struct ColorVisitor;
 
-impl<'de> serde::de::Visitor<'de> for ColorVisitor {
+impl serde::de::Visitor<'_> for ColorVisitor {
     type Value = Color;
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -335,7 +335,7 @@ impl<'de> Deserialize<'de> for RawBuildResult {
     {
         struct Visitor;
 
-        impl<'de> serde::de::Visitor<'de> for Visitor {
+        impl serde::de::Visitor<'_> for Visitor {
             type Value = RawBuildResult;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {

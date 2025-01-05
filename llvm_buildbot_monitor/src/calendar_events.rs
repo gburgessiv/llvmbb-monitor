@@ -30,7 +30,7 @@ async fn load_state(
     };
     // Fetch events from 2wks into the future; should be plenty.
     let events = calendar_check::fetch_near_llvm_calendar_office_hour_events(
-        &client,
+        client,
         &now,
         Duration::from_secs(14 * 24 * 60 * 60),
     )
@@ -116,7 +116,7 @@ fn run_discord_pings(
     storage: &Arc<Mutex<Storage>>,
     discord_messages: &broadcast::Sender<CommunityEvent>,
 ) {
-    let events_to_ping = ping_indices.into_iter().map(|&i| (i, &state.events[i]));
+    let events_to_ping = ping_indices.iter().map(|&i| (i, &state.events[i]));
     let mut successful_pings = Vec::new();
     for (i, event) in events_to_ping {
         if discord_messages.send(event.clone()).is_err() {
@@ -137,14 +137,14 @@ fn run_discord_pings(
     let storage = storage.clone();
     // Just drop this on the floor, under the expectation that it'll
     // complete soon enough anyway.
-    let _ = tokio::task::spawn_blocking(move || {
+    std::mem::drop(tokio::task::spawn_blocking(move || {
         for i in successful_pings {
             let id = state.events[i].id.as_ref();
             if let Err(x) = storage.lock().unwrap().add_sent_calendar_ping(id) {
                 error!("Failed adding sent calendar ping to storage: {x}");
             }
         }
-    });
+    }));
 }
 
 fn calculate_event_ping_data(

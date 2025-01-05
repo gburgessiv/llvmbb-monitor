@@ -25,9 +25,13 @@ pub enum CommunityEventType {
 
 #[derive(Clone, Debug, Default)]
 pub struct CommunityEventDescriptionData {
+    /// Type of the event, as specified by the user.
     pub event_type: CommunityEventType,
+    /// List of users, without a leading '@'.
     pub mention_users: Vec<Box<str>>,
+    /// List of channels, without a leading '#'.
     pub mention_channels: Vec<Box<str>>,
+    /// Number of minutes before the start time for a ping.
     pub ping_duration_before_start_mins: Option<u32>,
 }
 
@@ -69,8 +73,8 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             let mut channels = Vec::new();
             for channel in line.split(',') {
                 let channel = channel.trim();
-                if channel.starts_with('#') {
-                    channels.push(channel.into());
+                if let Some(c) = channel.strip_prefix('#') {
+                    channels.push(c.into());
                 } else {
                     warn!("Dropping channel without leading #: {channel:?}");
                 }
@@ -83,8 +87,8 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             let mut users = Vec::new();
             for user in line.split(',') {
                 let user = user.trim();
-                if user.starts_with('@') {
-                    users.push(user.into());
+                if let Some(u) = user.strip_prefix('@') {
+                    users.push(u.into());
                 } else {
                     warn!("Dropping user without leading @: {user:?}");
                 }
@@ -204,7 +208,7 @@ fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> V
             description_data,
         });
     }
-    return results;
+    results
 }
 
 fn get_baseline_llvm_calendar_url() -> reqwest::Url {
