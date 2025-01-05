@@ -3,11 +3,13 @@ use crate::storage::Storage;
 use crate::{Bot, BotID, BotStatusSnapshot, CompletedBuild, Email};
 
 use std::borrow::{Borrow, Cow};
+use std::cell::LazyCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use calendar_check::CommunityEvent;
@@ -221,6 +223,194 @@ struct GuildServerState {
     ///
     /// If server_refcounts has a GuildId, this shall not have a matching one.
     orphan_refcounts: HashMap<GuildId, usize>,
+}
+
+struct ChannelEventBroadcaster {
+    guild_id: GuildId,
+    event_reader: broadcast::Receiver<CommunityEvent>,
+}
+
+fn build_community_event_announce_message(event: &CommunityEvent) -> String {
+    // The URL is generally pretty long, so just start with a 128b buffer.
+    let mut result = String::with_capacity(128);
+    result += "The `";
+    result += &sanitize_event_title(&event.title);
+    result.push('`');
+    match event.description_data.event_type {
+        calendar_check::CommunityEventType::OfficeHours => {
+            result += " office hours";
+        }
+        calendar_check::CommunityEventType::SyncUp => {
+            result += " sync-up";
+        }
+    }
+    write!(
+        &mut result,
+        " event is starting at <t:{}:f>! [Click here]({}) for more info.",
+        event.start_time.timestamp(),
+        event.event_link,
+    )
+    .unwrap();
+
+    for (i, user) in event.description_data.mention_users.iter().enumerate() {
+        if i == 0 {
+            result += " /cc ";
+        } else {
+            result += ", ";
+        }
+        // Note that `user` will have a leading '@'.
+        write!(&mut result, "<{}>", user).unwrap();
+    }
+    return result;
+
+    fn sanitize_event_title(title: &str) -> Cow<'_, str> {
+        if !title.contains('`') {
+            return Cow::Borrowed(title);
+        }
+        Cow::Owned(title.replace('`', "\'"))
+    }
+}
+
+impl ChannelEventBroadcaster {
+    async fn fetch_channels(&self, http: &Http) -> Result<HashMap<String, ChannelId>> {
+        use anyhow::Context;
+        let channels = http
+            .get_channels(self.guild_id)
+            .await
+            .context("getting guild channels")?;
+        Ok(channels.into_iter().map(|x| (x.name, x.id)).collect())
+    }
+
+    async fn lookup_channel_ids(
+        &self,
+        http: &Http,
+        broadcast_title: &str,
+        channel_cache: &mut HashMap<String, ChannelId>,
+        last_cache_update: &mut Instant,
+        channel_names: impl Iterator<Item = &str>,
+    ) -> Vec<ChannelId> {
+        let now = LazyCell::new(Instant::now);
+        let mut channel_ids = Vec::new();
+        for name in channel_names {
+            let id = match channel_cache.get(name) {
+                Some(id) => Some(*id),
+                None => {
+                    let now = *now;
+                    let since_last_update = now.duration_since(*last_cache_update);
+                    let mut result = None;
+                    if since_last_update > Duration::from_secs(60 * 60) {
+                        info!(
+                            concat!(
+                                "Unknown calendar event broadcast channel encountered ",
+                                "({:?}); {:?} since last update. Refreshing channel cache.",
+                            ),
+                            name, since_last_update
+                        );
+
+                        match self.fetch_channels(http).await {
+                            Ok(x) => {
+                                *channel_cache = x;
+                                *last_cache_update = now;
+                                if let Some(id) = channel_cache.get(name) {
+                                    result = Some(*id);
+                                }
+                            }
+                            Err(x) => {
+                                warn!("Failed updating channel list; ignoring: {x}");
+                            }
+                        }
+                    }
+                    result
+                }
+            };
+
+            match id {
+                Some(x) => channel_ids.push(x),
+                None => {
+                    warn!(
+                        "Unknown channel name {name:?} found in event with title {:?}",
+                        broadcast_title
+                    );
+                }
+            }
+        }
+
+        // Sort to ensure consistent ordering, and dedup in case the user had #office-hours
+        // in the list mistakenly (or any other duplicate channel, for that matter).
+        channel_ids.sort_unstable();
+        channel_ids.dedup();
+        channel_ids
+    }
+
+    async fn serve<F>(&mut self, http: &Http, mut should_exit: F) -> Result<()>
+    where
+        F: FnMut() -> bool,
+    {
+        let mut channels = self.fetch_channels(http).await?;
+        let mut last_channel_update = Instant::now();
+
+        loop {
+            let next_broadcast = self.event_reader.recv().await?;
+            if should_exit() {
+                return Ok(());
+            }
+            info!("Received event broadcast message: {next_broadcast:?}");
+
+            let implicit_office_hours_channel = match next_broadcast.description_data.event_type {
+                calendar_check::CommunityEventType::OfficeHours => Some("#office-hours"),
+                _ => None,
+            };
+
+            let channel_names_to_broadcast = next_broadcast
+                .description_data
+                .mention_channels
+                .iter()
+                .map(|x| x.as_ref())
+                .chain(implicit_office_hours_channel);
+            let channel_ids = self
+                .lookup_channel_ids(
+                    http,
+                    &next_broadcast.title,
+                    &mut channels,
+                    &mut last_channel_update,
+                    channel_names_to_broadcast,
+                )
+                .await;
+
+            if channel_ids.is_empty() {
+                warn!(
+                    "No channels found to send for calendar event {:?}; dropping",
+                    next_broadcast.title
+                );
+                continue;
+            }
+
+            info!(
+                "Broadcasting messages about {:?} to {} channel(s)...",
+                next_broadcast.title,
+                channel_ids.len(),
+            );
+
+            let message_chunks = split_message(
+                build_community_event_announce_message(&next_broadcast),
+                DISCORD_MESSAGE_SIZE_LIMIT,
+            );
+            for channel_id in channel_ids {
+                for chunk in &message_chunks {
+                    if let Err(e) = channel_id
+                        .send_message(http, builder::CreateMessage::new().content(chunk))
+                        .await
+                    {
+                        error!(
+                            "Failed sending message chunk about cal event to channel {:?}: {e}",
+                            channel_id
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct ChannelServer {
@@ -489,7 +679,7 @@ impl ChannelServer {
         &mut self,
         http: &Http,
         ui: &mut UIBroadcastReceiver,
-        should_exit: &mut F,
+        mut should_exit: F,
     ) -> Result<()>
     where
         F: FnMut() -> bool,
@@ -779,19 +969,21 @@ impl serenity::client::EventHandler for MessageHandler {
             None => return,
         };
 
-        let bot_user_id = ctx.cache.current_user().id;
-        let http = ctx.http;
-        let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
-        let guild_state = self.servers.clone();
-        let storage = self.storage.clone();
-        tokio::spawn(async move {
-            let mut responded_with_yes = false;
-            let mut should_exit = move || {
-                if responded_with_yes {
+        let should_exit = {
+            let guild_state = self.servers.clone();
+            let responded_with_yes = AtomicBool::new(false);
+            Arc::new(move || {
+                if responded_with_yes.load(Ordering::Relaxed) {
                     return true;
                 }
 
                 let mut state = guild_state.lock().unwrap();
+                // Double-check this, since the stuff below mutates things. Don't want to do it
+                // twice if threads race.
+                if responded_with_yes.load(Ordering::Relaxed) {
+                    return true;
+                }
+
                 match state.server_refcounts.entry(guild_id) {
                     Entry::Vacant(_) => {
                         unreachable!("Guilds should always have an entry in the refcount table");
@@ -808,12 +1000,55 @@ impl serenity::client::EventHandler for MessageHandler {
                             state.orphan_refcounts.insert(guild_id, uval);
                         }
 
-                        responded_with_yes = true;
+                        responded_with_yes.store(true, Ordering::Relaxed);
                         true
                     }
                 }
-            };
+            })
+        };
 
+        let bot_user_id = ctx.cache.current_user().id;
+        let http = ctx.http;
+        // Spawn the calendar event broadcaster.
+        {
+            let should_exit = should_exit.clone();
+            let http = http.clone();
+            let event_reader = self.community_event_sender.subscribe();
+            // TODO: This is mostly duplicated from the ChannelServer block below. Might be nice to
+            // factor commonality out.
+            tokio::spawn(async move {
+                let mut broadcaster = ChannelEventBroadcaster {
+                    event_reader,
+                    guild_id,
+                };
+                loop {
+                    info!("Setting up event broadcasting for guild #{}", guild_id);
+                    if let Err(x) = broadcaster.serve(&http, &*should_exit).await {
+                        error!("Failed broadcasting events for guild #{}: {}", guild_id, x);
+                    }
+
+                    if should_exit() {
+                        break;
+                    }
+
+                    // If we're seeing errors, it's probs best to sit back for a bit.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+
+                    // Double-check this, since there's a chance we saw errors related to an in-flight
+                    // shutdown notice.
+                    if should_exit() {
+                        break;
+                    }
+                }
+
+                info!("Shut down event broadcasting for #{}", guild_id);
+            });
+        }
+
+        // Spawn the buildbot status broadcaster.
+        let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
+        let storage = self.storage.clone();
+        tokio::spawn(async move {
             let mut server = ChannelServer {
                 bot_user_id,
                 status_channel,
@@ -825,12 +1060,9 @@ impl serenity::client::EventHandler for MessageHandler {
                 storage,
             };
             loop {
-                info!("Setting up serving for guild #{}", guild_id);
-                if let Err(x) = server
-                    .serve(&http, &mut pubsub_reader, &mut should_exit)
-                    .await
-                {
-                    error!("Failed serving guild #{}: {}", guild_id, x);
+                info!("Setting up bot status serving for guild #{}", guild_id);
+                if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
+                    error!("Failed serving bot status for guild #{}: {}", guild_id, x);
                 }
 
                 if should_exit() {
@@ -847,7 +1079,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
             }
 
-            info!("Shut down serving for #{}", guild_id);
+            info!("Shut down bot status serving for #{}", guild_id);
         });
     }
 
@@ -1472,5 +1704,43 @@ mod test {
         vec.unregister(&token);
         vec.compact();
         assert!(vec.values.is_empty());
+    }
+
+    #[test]
+    fn test_announcement_message_generation_works() {
+        use chrono::DateTime;
+
+        let msg = build_community_event_announce_message(&CommunityEvent {
+            start_time: DateTime::from_timestamp(1234, 1).unwrap(),
+            title: "Foo `bar".into(),
+            event_link: "http://link".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            msg,
+            concat!(
+                "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
+                "[Click here](http://link) for more info."
+            )
+        );
+
+        let msg = build_community_event_announce_message(&CommunityEvent {
+            start_time: DateTime::from_timestamp(1234, 1).unwrap(),
+            title: "baz!".into(),
+            event_link: "http://link".into(),
+            description_data: calendar_check::CommunityEventDescriptionData {
+                mention_users: vec!["@foo".into(), "@bar".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(
+            msg,
+            concat!(
+                "The `baz!` office hours event is starting at <t:1234:f>! ",
+                "[Click here](http://link) for more info. /cc <@foo>, <@bar>"
+            )
+        );
     }
 }
