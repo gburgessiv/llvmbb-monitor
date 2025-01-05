@@ -209,6 +209,7 @@ fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> V
             description_data,
         });
     }
+
     results
 }
 

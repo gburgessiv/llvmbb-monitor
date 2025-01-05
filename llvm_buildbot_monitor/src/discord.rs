@@ -227,10 +227,14 @@ struct GuildServerState {
 
 struct ChannelEventBroadcaster {
     guild_id: GuildId,
+    guild_member_cache: Arc<GuildMemberCache>,
     event_reader: broadcast::Receiver<CommunityEvent>,
 }
 
-fn build_community_event_announce_message(event: &CommunityEvent) -> String {
+fn build_community_event_announce_message(
+    event: &CommunityEvent,
+    guild_members: &[GuildUserInfo],
+) -> String {
     // The URL is generally pretty long, so just start with a 128b buffer.
     let mut result = String::with_capacity(128);
     result += "The `";
@@ -252,13 +256,47 @@ fn build_community_event_announce_message(event: &CommunityEvent) -> String {
     )
     .unwrap();
 
-    for (i, user) in event.description_data.mention_users.iter().enumerate() {
+    let mention_user_names = &event.description_data.mention_users;
+    if mention_user_names.is_empty() {
+        return result;
+    }
+
+    let users_to_mention: Vec<_> = {
+        let mut yet_to_mention = mention_user_names
+            .iter()
+            .map(|x| x.as_ref())
+            .collect::<HashSet<&str>>();
+        let mut mentionable = Vec::new();
+        for member in guild_members {
+            if !yet_to_mention.remove(member.username.as_ref()) {
+                continue;
+            }
+            mentionable.push((member.user_id, member.nickname_or_default()));
+
+            if yet_to_mention.is_empty() {
+                break;
+            }
+        }
+
+        if !yet_to_mention.is_empty() {
+            warn!(
+                "Failed to find user(s) in event: {:?}; ignoring",
+                yet_to_mention
+            );
+        }
+
+        // Mention everyone in sorted order by nickname (falling back to username)
+        mentionable.sort_unstable_by_key(|x| x.1);
+        mentionable
+    };
+
+    for (i, (user_id, _)) in users_to_mention.into_iter().enumerate() {
         if i == 0 {
             result += " /cc ";
         } else {
             result += ", ";
         }
-        write!(&mut result, "@{}", user).unwrap();
+        write!(&mut result, "<@{}>", user_id).unwrap();
     }
     return result;
 
@@ -390,8 +428,23 @@ impl ChannelEventBroadcaster {
                 channel_ids.len(),
             );
 
+            let current_users_storage;
+            let current_users = match self.guild_member_cache.fetch_members(http).await {
+                Ok(x) => {
+                    current_users_storage = x;
+                    current_users_storage.as_slice()
+                }
+                Err(x) => {
+                    // Failing to /cc users isn't ... world-ending. Just live with it.
+                    error!(
+                        "Failed getting users cache for event; skipping username resolution: {x}"
+                    );
+                    &[]
+                }
+            };
+
             let message_chunks = split_message(
-                build_community_event_announce_message(&next_broadcast),
+                build_community_event_announce_message(&next_broadcast, current_users),
                 DISCORD_MESSAGE_SIZE_LIMIT,
             );
             for channel_id in channel_ids {
@@ -414,10 +467,10 @@ impl ChannelEventBroadcaster {
 
 struct ChannelServer {
     bot_user_id: UserId,
-    guild: GuildId,
     status_channel: ChannelId,
     updates_channel: ChannelId,
 
+    guild_member_cache: Arc<GuildMemberCache>,
     ui: Option<Arc<UI>>,
     unsent_breakages: VecDeque<Arc<BotBuild>>,
     storage: Arc<Mutex<Storage>>,
@@ -428,38 +481,23 @@ struct ServerUIMessage {
     id: MessageId,
 }
 
-#[derive(Default)]
-struct BlamelistCache {
+struct BlamelistCache<'a> {
     email_id_mappings: HashMap<Email, Vec<UserId>>,
-    // Cache of User ID -> Optional nickname
-    known_guild_members: Option<HashMap<UserId, Option<Box<str>>>>,
+    guild_member_cache: &'a GuildMemberCache,
 }
 
-impl BlamelistCache {
+impl<'a> BlamelistCache<'a> {
     async fn append_blamelist(
         &mut self,
         target: &mut String,
         http: &Http,
         blamelist: &[Email],
-        guild: GuildId,
         storage: &Mutex<Storage>,
     ) -> Result<()> {
         if blamelist.is_empty() {
             return Ok(());
         }
 
-        if self.known_guild_members.is_none() {
-            let mut r: HashMap<UserId, Option<Box<str>>> = HashMap::new();
-            let mut members_iter = guild.members_iter(http).boxed();
-            while let Some(member) = members_iter.next().await {
-                let member = member?;
-                r.insert(member.user.id, member.nick.map(|x| x.into_boxed_str()));
-            }
-            info!("Fetched {} members from #{}", r.len(), guild);
-            self.known_guild_members = Some(r);
-        }
-
-        let guild_members = self.known_guild_members.as_ref().unwrap();
         {
             let storage = storage.lock().unwrap();
             for email in blamelist {
@@ -486,6 +524,13 @@ impl BlamelistCache {
         // UI cleaner, so...
         let mut emails: Vec<&Email> = Vec::new();
         let mut user_ids: HashSet<UserId> = HashSet::new();
+        let guild_member_storage = self.guild_member_cache.fetch_members(http).await?;
+        // TODO: Would be nice to not build this entire map up every time this function is called.
+        let guild_members = guild_member_storage
+            .iter()
+            .map(|g| (g.user_id, g.nickname_or_default()))
+            .collect::<HashMap<UserId, &str>>();
+
         for email in blamelist {
             let users_to_ping = self.email_id_mappings.get(email).unwrap();
             let mut pinged_anyone = false;
@@ -521,6 +566,78 @@ impl BlamelistCache {
         }
         target.push(')');
         Ok(())
+    }
+}
+
+struct GuildUserInfo {
+    user_id: UserId,
+    nickname: Option<Box<str>>,
+    username: Box<str>,
+}
+
+impl GuildUserInfo {
+    fn nickname_or_default(&self) -> &str {
+        self.nickname.as_deref().unwrap_or(self.username.as_ref())
+    }
+}
+
+struct GuildMemberCache {
+    guild_id: GuildId,
+    cached: tokio::sync::Mutex<Option<(Instant, Arc<Vec<GuildUserInfo>>)>>,
+}
+
+impl GuildMemberCache {
+    fn new(guild_id: GuildId) -> Self {
+        Self {
+            guild_id,
+            cached: Default::default(),
+        }
+    }
+
+    async fn fetch_members(&self, http: &Http) -> Result<Arc<Vec<GuildUserInfo>>> {
+        let mut cache = self.cached.lock().await;
+        let now = Instant::now();
+        if let Some((last_refresh_attempt, val)) = cache.as_mut() {
+            // Arbitrarily check for new members every hour or so.
+            if now.duration_since(*last_refresh_attempt) > Duration::from_secs(60 * 60) {
+                match Self::fetch_members_bypassing_cache(self.guild_id, http).await {
+                    Ok(x) => {
+                        *last_refresh_attempt = now;
+                        *val = Arc::new(x);
+                    }
+                    Err(x) => {
+                        *last_refresh_attempt = now;
+                        // If something failed, just log it and keep the old value around.
+                        error!(
+                            "Failed updating member cache for guild {}: {x}",
+                            self.guild_id
+                        );
+                    }
+                }
+            }
+            return Ok(val.clone());
+        }
+
+        let result = Arc::new(Self::fetch_members_bypassing_cache(self.guild_id, http).await?);
+        *cache = Some((now, result.clone()));
+        Ok(result)
+    }
+
+    async fn fetch_members_bypassing_cache(
+        guild_id: GuildId,
+        http: &Http,
+    ) -> Result<Vec<GuildUserInfo>> {
+        let mut result: Vec<GuildUserInfo> = Vec::new();
+        let mut members_iter = guild_id.members_iter(http).boxed();
+        while let Some(member) = members_iter.next().await {
+            let member = member?;
+            result.push(GuildUserInfo {
+                user_id: member.user.id,
+                nickname: member.nick.map(Into::into),
+                username: member.user.name.into(),
+            })
+        }
+        Ok(result)
     }
 }
 
@@ -601,7 +718,10 @@ impl ChannelServer {
     }
 
     async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
-        let mut blamelist_cache = BlamelistCache::default();
+        let mut blamelist_cache = BlamelistCache {
+            email_id_mappings: Default::default(),
+            guild_member_cache: &self.guild_member_cache,
+        };
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
 
@@ -652,7 +772,6 @@ impl ChannelServer {
                         &mut current_message,
                         http,
                         &next_breakage.build.blamelist,
-                        self.guild,
                         &self.storage,
                     )
                     .await?;
@@ -1006,10 +1125,12 @@ impl serenity::client::EventHandler for MessageHandler {
             })
         };
 
+        let guild_member_cache = Arc::new(GuildMemberCache::new(guild_id));
         let bot_user_id = ctx.cache.current_user().id;
         let http = ctx.http;
         // Spawn the calendar event broadcaster.
         {
+            let guild_member_cache = guild_member_cache.clone();
             let should_exit = should_exit.clone();
             let http = http.clone();
             let event_reader = self.community_event_sender.subscribe();
@@ -1017,8 +1138,9 @@ impl serenity::client::EventHandler for MessageHandler {
             // factor commonality out.
             tokio::spawn(async move {
                 let mut broadcaster = ChannelEventBroadcaster {
-                    event_reader,
                     guild_id,
+                    guild_member_cache,
+                    event_reader,
                 };
                 loop {
                     info!("Setting up event broadcasting for guild #{}", guild_id);
@@ -1053,7 +1175,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 status_channel,
                 updates_channel,
 
-                guild: guild_id,
+                guild_member_cache,
                 ui: None,
                 unsent_breakages: VecDeque::new(),
                 storage,
@@ -1709,36 +1831,54 @@ mod test {
     fn test_announcement_message_generation_works() {
         use chrono::DateTime;
 
-        let msg = build_community_event_announce_message(&CommunityEvent {
-            start_time: DateTime::from_timestamp(1234, 1).unwrap(),
-            title: "Foo `bar".into(),
-            event_link: "http://link".into(),
-            ..Default::default()
-        });
+        let msg = build_community_event_announce_message(
+            &CommunityEvent {
+                start_time: DateTime::from_timestamp(1234, 1).unwrap(),
+                title: "Foo `bar".into(),
+                event_link: "http://link".into(),
+                ..Default::default()
+            },
+            /*guild_members=*/ &[],
+        );
         assert_eq!(
             msg,
             concat!(
                 "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
-                "[Click here](http://link) for more info."
+                "<[Click here](http://link)> for more info."
             )
         );
 
+        let guild_members = [
+            GuildUserInfo{
+                user_id: UserId::new(1234),
+                nickname: None,
+                username: "bar".into(),
+            },
+            GuildUserInfo{
+                user_id: UserId::new(4321),
+                nickname: None,
+                username: "foo".into(),
+            },
+            // Don't have a mapping for 'baz', so the fallback for that can be tested.
+        ];
         let msg = build_community_event_announce_message(&CommunityEvent {
             start_time: DateTime::from_timestamp(1234, 1).unwrap(),
             title: "baz!".into(),
             event_link: "http://link".into(),
             description_data: calendar_check::CommunityEventDescriptionData {
-                mention_users: vec!["foo".into(), "bar".into()],
+                mention_users: vec!["foo".into(), "bar".into(), "baz".into()],
                 ..Default::default()
             },
             ..Default::default()
-        });
+        },
+        &guild_members,
+        );
 
         assert_eq!(
             msg,
             concat!(
                 "The `baz!` office hours event is starting at <t:1234:f>! ",
-                "[Click here](http://link) for more info. /cc <@foo>, <@bar>"
+                "<[Click here](http://link)> for more info. /cc <@1234>, <@4321>"
             )
         );
     }
