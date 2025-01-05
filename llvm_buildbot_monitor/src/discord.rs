@@ -246,7 +246,7 @@ fn build_community_event_announce_message(event: &CommunityEvent) -> String {
     }
     write!(
         &mut result,
-        " event is starting at <t:{}:f>! [Click here]({}) for more info.",
+        " event is starting at <t:{}:f>! <[Click here]({})> for more info.",
         event.start_time.timestamp(),
         event.event_link,
     )
@@ -258,7 +258,7 @@ fn build_community_event_announce_message(event: &CommunityEvent) -> String {
         } else {
             result += ", ";
         }
-        write!(&mut result, "<@{}>", user).unwrap();
+        write!(&mut result, "@{}", user).unwrap();
     }
     return result;
 
