@@ -68,10 +68,9 @@ async fn load_state_with_retry() -> State {
     }
 }
 
-fn calculate_ping_time(event: &CommunityEvent) -> Option<DateTime<Utc>> {
-    let ping_mins = event.description_data.ping_duration_before_start_mins?;
-    let ping_at_time = event.start_time - Duration::from_secs(ping_mins as u64 * 60);
-    Some(ping_at_time)
+fn calculate_ping_time(event: &CommunityEvent) -> DateTime<Utc> {
+    let ping_mins = event.description_data.ping_duration_before_start_mins;
+    event.start_time - Duration::from_secs(ping_mins as u64 * 60)
 }
 
 fn load_and_gc_previous_calendar_pings(
@@ -157,10 +156,7 @@ fn calculate_event_ping_data(
         .iter()
         .enumerate()
         .filter(|(_, e)| e.start_time > *now && !already_pinged.contains(&e.id))
-        .filter_map(|(i, e)| {
-            let ping_time = calculate_ping_time(e)?;
-            Some((i, ping_time))
-        });
+        .map(|(i, e)| (i, calculate_ping_time(e)));
 
     let mut ping_now_indices = Vec::new();
     let mut nearest_unfired_ping = None::<DateTime<Utc>>;
@@ -245,7 +241,7 @@ fn calculate_next_refresh_time(state: &State) -> DateTime<Utc> {
         .events
         .iter()
         .filter_map(|x| {
-            let ping_at_time = calculate_ping_time(x)?;
+            let ping_at_time = calculate_ping_time(x);
             let refresh_at_time = ping_at_time - PRE_PING_STATE_REFRESH_TIME;
             if state.refreshed_at >= refresh_at_time {
                 return None;
@@ -290,7 +286,10 @@ pub(crate) async fn run_calendar_forever(
         }
 
         let new_state = load_state_with_retry().await;
-        info!("Calendar refresh successfully loaded {:?} events", new_state.events.len());
+        info!(
+            "Calendar refresh successfully loaded {:?} events",
+            new_state.events.len()
+        );
         // The receiver is meant to also run forever. Something really bad
         // happened if it died. Probably best to just crash the program at that
         // point, honestly.
@@ -320,7 +319,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "1-sec-ago".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -330,7 +329,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "now".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -340,7 +339,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-2-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -350,7 +349,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-5-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -387,7 +386,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "now".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -397,7 +396,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-2-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -407,7 +406,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-5-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -436,7 +435,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "now".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -446,7 +445,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-2-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -456,7 +455,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-5-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -466,7 +465,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(360),
                     id: "in-65-secs".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -502,7 +501,7 @@ mod test {
                 start_time: baseline_time + Duration::from_secs(60 * 60 * 2),
                 end_time: baseline_time + Duration::from_secs(60 * 60 * 3),
                 description_data: calendar_check::CommunityEventDescriptionData {
-                    ping_duration_before_start_mins: Some(0),
+                    ping_duration_before_start_mins: 0,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -525,7 +524,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(3600),
                     id: "1-sec-ago".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(0),
+                        ping_duration_before_start_mins: 0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -535,7 +534,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(3600),
                     id: "in-2-minutes".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -545,7 +544,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(3600),
                     id: "in-10-minutes".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -555,7 +554,7 @@ mod test {
                     end_time: baseline_time + Duration::from_secs(3600),
                     id: "in-20-minutes".into(),
                     description_data: calendar_check::CommunityEventDescriptionData {
-                        ping_duration_before_start_mins: Some(1),
+                        ping_duration_before_start_mins: 1,
                         ..Default::default()
                     },
                     ..Default::default()

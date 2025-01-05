@@ -32,7 +32,7 @@ pub struct CommunityEventDescriptionData {
     /// List of channels, without a leading '#'.
     pub mention_channels: Vec<Box<str>>,
     /// Number of minutes before the start time for a ping.
-    pub ping_duration_before_start_mins: Option<u32>,
+    pub ping_duration_before_start_mins: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -127,7 +127,8 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
         event_type,
         mention_users: event_mention.unwrap_or_default(),
         mention_channels: event_channels.unwrap_or_default(),
-        ping_duration_before_start_mins: event_reminder,
+        // Default to pinging 30mins before the event.
+        ping_duration_before_start_mins: event_reminder.unwrap_or(30),
     });
 
     fn strip_prefix_once<'a, T>(
