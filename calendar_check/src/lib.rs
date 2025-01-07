@@ -54,7 +54,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
 
     for line in event_description.lines() {
         if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", line) {
-            let line = line.trim();
+            let line = remove_comment(line).trim();
             let e = match line {
                 "office-hours" => CommunityEventType::OfficeHours,
                 "sync-up" => CommunityEventType::SyncUp,
@@ -71,7 +71,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             strip_prefix_once(&event_channels, "discord-bot-channels-to-mention:", line)
         {
             let mut channels = Vec::new();
-            for channel in line.split(',') {
+            for channel in remove_comment(line).split(',') {
                 let channel = channel.trim();
                 if let Some(c) = channel.strip_prefix('#') {
                     channels.push(c.into());
@@ -85,7 +85,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
 
         if let Some(line) = strip_prefix_once(&event_mention, "discord-bot-mention:", line) {
             let mut users = Vec::new();
-            for user in line.split(',') {
+            for user in remove_comment(line).split(',') {
                 let user = user.trim();
                 if let Some(u) = user.strip_prefix('@') {
                     users.push(u.into());
@@ -102,7 +102,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             "discord-bot-reminder-minutes-before-start:",
             line,
         ) {
-            let line = line.trim();
+            let line = remove_comment(line).trim();
             match line.parse() {
                 Ok(n) => {
                     event_reminder = Some(n);
@@ -142,6 +142,13 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             return None;
         }
         Some(no_prefix)
+    }
+
+    fn remove_comment(s: &str) -> &str {
+        let Some(i) = s.find("//") else {
+            return s;
+        };
+        &s[..i]
     }
 }
 
