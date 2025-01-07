@@ -250,7 +250,7 @@ fn build_community_event_announce_message(
     }
     write!(
         &mut result,
-        " event is starting at <t:{}:f>! <[Click here]({})> for more.",
+        " event is starting at <t:{}:f>! [Click here](<{}>) for more.",
         event.start_time.timestamp(),
         event.event_link,
     )
@@ -1853,7 +1853,7 @@ mod test {
             msg,
             concat!(
                 "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
-                "<[Click here](http://link)> for more."
+                "[Click here](<http://link>) for more."
             )
         );
 
@@ -1888,7 +1888,7 @@ mod test {
             msg,
             concat!(
                 "The `baz!` office hours event is starting at <t:1234:f>! ",
-                "<[Click here](http://link)> for more. /cc <@1234>, <@4321>"
+                "[Click here](<http://link>) for more. /cc <@1234>, <@4321>"
             )
         );
     }
@@ -1914,7 +1914,7 @@ mod test {
             msg,
             concat!(
                 "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
-                "<[Click here](http://link)> for more. Extra info: `'foo!`."
+                "[Click here](<http://link>) for more. Extra info: `'foo!`."
             )
         );
     }
