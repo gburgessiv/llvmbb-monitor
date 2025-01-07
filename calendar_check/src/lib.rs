@@ -31,6 +31,8 @@ pub struct CommunityEventDescriptionData {
     pub mention_users: Vec<Box<str>>,
     /// List of channels, without a leading '#'.
     pub mention_channels: Vec<Box<str>>,
+    /// Extra message to include in event pings.
+    pub extra_message: Option<Box<str>>,
     /// Number of minutes before the start time for a ping.
     pub ping_duration_before_start_mins: u32,
 }
@@ -51,6 +53,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
     let mut event_channels = None;
     let mut event_mention = None;
     let mut event_reminder = None;
+    let mut extra_message = None;
 
     for line in event_description.lines() {
         if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", line) {
@@ -113,10 +116,20 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             }
             continue;
         }
+
+        if let Some(line) = strip_prefix_once(&extra_message, "discord-bot-message:", line) {
+            let line = line.trim();
+            extra_message = Some(line.into());
+            continue;
+        }
     }
 
     let Some(event_type) = event_type else {
-        if event_channels.is_some() || event_mention.is_some() || event_reminder.is_some() {
+        if event_channels.is_some()
+            || event_mention.is_some()
+            || event_reminder.is_some()
+            || extra_message.is_some()
+        {
             warn!("Skipping event with no event-type, but other discord bot metadata");
         }
 
@@ -127,6 +140,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
         event_type,
         mention_users: event_mention.unwrap_or_default(),
         mention_channels: event_channels.unwrap_or_default(),
+        extra_message,
         // Default to pinging 30mins before the event.
         ping_duration_before_start_mins: event_reminder.unwrap_or(30),
     });

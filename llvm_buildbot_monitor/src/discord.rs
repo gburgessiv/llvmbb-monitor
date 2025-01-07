@@ -238,7 +238,7 @@ fn build_community_event_announce_message(
     // The URL is generally pretty long, so just start with a 128b buffer.
     let mut result = String::with_capacity(128);
     result += "The `";
-    result += &sanitize_event_title(&event.title);
+    result += &sanitize_event_text(&event.title);
     result.push('`');
     match event.description_data.event_type {
         calendar_check::CommunityEventType::OfficeHours => {
@@ -250,11 +250,20 @@ fn build_community_event_announce_message(
     }
     write!(
         &mut result,
-        " event is starting at <t:{}:f>! <[Click here]({})> for more info.",
+        " event is starting at <t:{}:f>! <[Click here]({})> for more.",
         event.start_time.timestamp(),
         event.event_link,
     )
     .unwrap();
+
+    if let Some(extra_info) = &event.description_data.extra_message {
+        write!(
+            &mut result,
+            " Extra info: `{}`.",
+            sanitize_event_text(&extra_info),
+        )
+        .unwrap();
+    }
 
     let mention_user_names = &event.description_data.mention_users;
     if mention_user_names.is_empty() {
@@ -300,7 +309,7 @@ fn build_community_event_announce_message(
     }
     return result;
 
-    fn sanitize_event_title(title: &str) -> Cow<'_, str> {
+    fn sanitize_event_text(title: &str) -> Cow<'_, str> {
         if !title.contains('`') {
             return Cow::Borrowed(title);
         }
@@ -1844,41 +1853,68 @@ mod test {
             msg,
             concat!(
                 "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
-                "<[Click here](http://link)> for more info."
+                "<[Click here](http://link)> for more."
             )
         );
 
         let guild_members = [
-            GuildUserInfo{
+            GuildUserInfo {
                 user_id: UserId::new(1234),
                 nickname: None,
                 username: "bar".into(),
             },
-            GuildUserInfo{
+            GuildUserInfo {
                 user_id: UserId::new(4321),
                 nickname: None,
                 username: "foo".into(),
             },
             // Don't have a mapping for 'baz', so the fallback for that can be tested.
         ];
-        let msg = build_community_event_announce_message(&CommunityEvent {
-            start_time: DateTime::from_timestamp(1234, 1).unwrap(),
-            title: "baz!".into(),
-            event_link: "http://link".into(),
-            description_data: calendar_check::CommunityEventDescriptionData {
-                mention_users: vec!["foo".into(), "bar".into(), "baz".into()],
+        let msg = build_community_event_announce_message(
+            &CommunityEvent {
+                start_time: DateTime::from_timestamp(1234, 1).unwrap(),
+                title: "baz!".into(),
+                event_link: "http://link".into(),
+                description_data: calendar_check::CommunityEventDescriptionData {
+                    mention_users: vec!["foo".into(), "bar".into(), "baz".into()],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        },
-        &guild_members,
+            &guild_members,
         );
 
         assert_eq!(
             msg,
             concat!(
                 "The `baz!` office hours event is starting at <t:1234:f>! ",
-                "<[Click here](http://link)> for more info. /cc <@1234>, <@4321>"
+                "<[Click here](http://link)> for more. /cc <@1234>, <@4321>"
+            )
+        );
+    }
+
+    #[test]
+    fn test_announcement_message_generation_adds_extra_info() {
+        use chrono::DateTime;
+
+        let msg = build_community_event_announce_message(
+            &CommunityEvent {
+                start_time: DateTime::from_timestamp(1234, 1).unwrap(),
+                title: "Foo `bar".into(),
+                event_link: "http://link".into(),
+                description_data: calendar_check::CommunityEventDescriptionData {
+                    extra_message: Some("`foo!".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            /*guild_members=*/ &[],
+        );
+        assert_eq!(
+            msg,
+            concat!(
+                "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
+                "<[Click here](http://link)> for more. Extra info: `'foo!`."
             )
         );
     }
