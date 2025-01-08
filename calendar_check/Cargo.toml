@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0.95"
 chrono = "0.4.39"
 clap = { version = "4.5.23", features = ["derive"] }
+html2text = "0.13"
 log = "0.4.22"
 reqwest = "0.11"
 serde = { version = "1.0.217", features = ["derive"] }

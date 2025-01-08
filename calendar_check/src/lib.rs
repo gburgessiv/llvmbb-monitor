@@ -1,5 +1,3 @@
-// TODO: VERIFY THAT THE TIMEZONE STUFF WORKS HERE - CURRENTLY SET TO UTC BUT COULD REQUIRE SPECIAL
-// TREATMENT
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -48,7 +46,109 @@ pub struct CommunityEvent {
     pub description_data: CommunityEventDescriptionData,
 }
 
-fn parse_event_description_data(event_description: &str) -> Option<CommunityEventDescriptionData> {
+fn description_html_to_text(description_html: &str) -> Result<String> {
+    struct Deco;
+
+    impl html2text::render::TextDecorator for Deco {
+        type Annotation = ();
+
+        fn decorate_link_start(&mut self, _url: &str) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn decorate_link_end(&mut self) -> String {
+            String::new()
+        }
+
+        fn decorate_em_start(&self) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn decorate_em_end(&self) -> String {
+            String::new()
+        }
+
+        fn decorate_strong_start(&self) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn decorate_strong_end(&self) -> String {
+            String::new()
+        }
+
+        fn decorate_strikeout_start(&self) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn decorate_strikeout_end(&self) -> String {
+            String::new()
+        }
+
+        fn decorate_code_start(&self) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn decorate_code_end(&self) -> String {
+            String::new()
+        }
+
+        fn decorate_preformat_first(&self) -> Self::Annotation {}
+        fn decorate_preformat_cont(&self) -> Self::Annotation {}
+
+        fn decorate_image(&mut self, _src: &str, _title: &str) -> (String, Self::Annotation) {
+            (String::new(), ())
+        }
+
+        fn header_prefix(&self, _level: usize) -> String {
+            String::new()
+        }
+
+        fn quote_prefix(&self) -> String {
+            String::new()
+        }
+
+        fn unordered_item_prefix(&self) -> String {
+            String::new()
+        }
+
+        fn ordered_item_prefix(&self, _i: i64) -> String {
+            String::new()
+        }
+
+        fn finalise(&mut self, _links: Vec<String>) -> Vec<html2text::render::TaggedLine<()>> {
+            Vec::new()
+        }
+
+        fn make_subblock_decorator(&self) -> Self {
+            Self
+        }
+    }
+
+    let result = html2text::from_read_with_decorator(
+        description_html.as_bytes(),
+        /*width=*/ 10000,
+        Deco {},
+    )?;
+    Ok(result)
+}
+
+fn parse_event_description_data(
+    event_title: &str,
+    event_description_html: &str,
+) -> Option<CommunityEventDescriptionData> {
+    let event_description = match description_html_to_text(event_description_html) {
+        Err(x) => {
+            warn!(
+                "Failed converting event description for {:?} to text: {}",
+                event_title, x
+            );
+            return None;
+        }
+        Ok(x) => x,
+    };
+
+    log::info!("Description for {event_title:?} was {event_description:?}");
+
     let mut event_type = None;
     let mut event_channels = None;
     let mut event_mention = None;
@@ -56,7 +156,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
     let mut extra_message = None;
 
     for line in event_description.lines() {
-        if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", line) {
+        if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", &line) {
             let line = remove_comment(line).trim();
             let e = match line {
                 "office-hours" => CommunityEventType::OfficeHours,
@@ -71,7 +171,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
         }
 
         if let Some(line) =
-            strip_prefix_once(&event_channels, "discord-bot-channels-to-mention:", line)
+            strip_prefix_once(&event_channels, "discord-bot-channels-to-mention:", &line)
         {
             let mut channels = Vec::new();
             for channel in remove_comment(line).split(',') {
@@ -86,7 +186,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             continue;
         }
 
-        if let Some(line) = strip_prefix_once(&event_mention, "discord-bot-mention:", line) {
+        if let Some(line) = strip_prefix_once(&event_mention, "discord-bot-mention:", &line) {
             let mut users = Vec::new();
             for user in remove_comment(line).split(',') {
                 let user = user.trim();
@@ -102,8 +202,8 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
 
         if let Some(line) = strip_prefix_once(
             &event_reminder,
-            "discord-bot-reminder-minutes-before-start:",
-            line,
+            "discord-bot-reminder-time-before-start:",
+            &line,
         ) {
             let line = remove_comment(line).trim();
             match line.parse() {
@@ -117,7 +217,7 @@ fn parse_event_description_data(event_description: &str) -> Option<CommunityEven
             continue;
         }
 
-        if let Some(line) = strip_prefix_once(&extra_message, "discord-bot-message:", line) {
+        if let Some(line) = strip_prefix_once(&extra_message, "discord-bot-message:", &line) {
             let line = line.trim();
             extra_message = Some(line.into());
             continue;
@@ -216,7 +316,9 @@ fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> V
             continue;
         };
 
-        let Some(description_data) = parse_event_description_data(&event_description) else {
+        let event_title = event.summary;
+        let Some(description_data) = parse_event_description_data(&event_title, &event_description)
+        else {
             debug!("Skip: no community event data in description");
             continue;
         };
@@ -224,7 +326,7 @@ fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> V
         results.push(CommunityEvent {
             start_time,
             end_time,
-            title: event.summary.into(),
+            title: event_title.into(),
             id: event.id.into(),
             event_link: event.html_link.into(),
             description_data,
@@ -301,7 +403,10 @@ pub async fn fetch_near_llvm_calendar_office_hour_events(
 
     let response =
         serde_json::from_str::<Response>(&json).context("decoding google calendar json")?;
-    debug!("Fetched {} events from LLVM's calendar", response.items.len());
+    debug!(
+        "Fetched {} events from LLVM's calendar",
+        response.items.len()
+    );
     Ok(convert_cal_events_to_office_hours(response.items))
 }
 
