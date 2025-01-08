@@ -452,24 +452,23 @@ impl ChannelEventBroadcaster {
                 }
             };
 
-            let mut message_chunks = split_message(
+            let message_chunks = split_message(
                 build_community_event_announce_message(&next_broadcast, current_users),
                 DISCORD_MESSAGE_SIZE_LIMIT,
             );
             for (i, channel_id) in channel_ids.into_iter().enumerate() {
-                // Sneaky: add `@silent` to follow-up messages so people can be /cc'ed without
-                // receiving pings in multiple channels. This is OK post-split, since
-                // `DISCORD_MESSAGE_SIZE_LIMIT` is less than the _actual_ limit.
-                if i == 1 {
-                    for c in message_chunks.iter_mut() {
-                        c.insert_str(0, "@silent ");
-                    }
-                }
                 for chunk in &message_chunks {
-                    if let Err(e) = channel_id
-                        .send_message(http, builder::CreateMessage::new().content(chunk))
-                        .await
-                    {
+                    let mut message = builder::CreateMessage::new().content(chunk);
+                    if i != 0 {
+                        // Disallow mentions in this message, so people get a maximum of 1 ping
+                        // from this bot per event. Ideally, this would use @silent, but I can't
+                        // figure out how to do that with `serenity` (`discord.py` has a specific
+                        // parameter for it, and prepending "@silent" doesn't work)
+                        message =
+                            message.allowed_mentions(serenity::all::CreateAllowedMentions::new());
+                    }
+
+                    if let Err(e) = channel_id.send_message(http, message).await {
                         error!(
                             "Failed sending message chunk about cal event to channel {:?}: {e}",
                             channel_id
@@ -1303,9 +1302,7 @@ struct UI {
     messages: Vec<String>,
 }
 
-// It's actually 2K chars, but I'd prefer premature splitting over off-by-a-littles. Note that at
-// least one place appends to messages post-splitting (I know, I'm sorry), so being <2K is
-// functionally required.
+// It's actually 2K chars, but I'd prefer premature splitting over off-by-a-littles.
 const DISCORD_MESSAGE_SIZE_LIMIT: usize = 1900;
 
 /// Discord has a character limit for messages. This function splits at that limit.
