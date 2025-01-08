@@ -9,17 +9,7 @@ struct Args {
     debug: bool,
 }
 
-async fn run(args: Args) -> Result<()> {
-    stderrlog::new()
-        .verbosity(if args.debug {
-            log::Level::Debug
-        } else {
-            log::Level::Info
-        })
-        .timestamp(stderrlog::Timestamp::Millisecond)
-        .init()
-        .unwrap();
-
+async fn run() -> Result<()> {
     let events = calendar_check::fetch_near_llvm_calendar_office_hour_events(
         &reqwest::Client::new(),
         &chrono::Utc::now(),
@@ -33,8 +23,19 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
-    run(args).await
+
+    simple_logger::init_with_level(if args.debug {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    })
+    .unwrap();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?
+        .block_on(run())
 }

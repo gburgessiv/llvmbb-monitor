@@ -301,6 +301,7 @@ pub async fn fetch_near_llvm_calendar_office_hour_events(
 
     let response =
         serde_json::from_str::<Response>(&json).context("decoding google calendar json")?;
+    debug!("Fetched {} events from LLVM's calendar", response.items.len());
     Ok(convert_cal_events_to_office_hours(response.items))
 }
 
