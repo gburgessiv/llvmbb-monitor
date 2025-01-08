@@ -264,7 +264,14 @@ pub(crate) async fn run_calendar_forever(
     // N.B., this is Arc<> because `watch` has internal sync locking. The
     // discord integration may want to hold a borrow() for a while, which
     // could get spicy. Skip the spice by using a cheaply-cloneable type.
-    let (state_sender, state_receiver) = watch::channel(Arc::new(load_state_with_retry().await));
+    let (state_sender, state_receiver) = watch::channel(Arc::new({
+        let state = load_state_with_retry().await;
+        info!(
+            "Initial calendar check loaded {} events",
+            state.events.len()
+        );
+        state
+    }));
 
     tokio::spawn(run_discord_integration_forever(
         storage.clone(),
