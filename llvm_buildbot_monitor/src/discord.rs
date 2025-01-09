@@ -250,7 +250,7 @@ fn build_community_event_announce_message(
     }
     write!(
         &mut result,
-        " event is starting at <t:{}:f>! [Click here](<{}>) for more.",
+        " event is scheduled to start <t:{}:R>! [Click here](<{}>) for more.",
         event.start_time.timestamp(),
         event.event_link,
     )
@@ -1859,7 +1859,7 @@ mod test {
         assert_eq!(
             msg,
             concat!(
-                "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
+                "The `Foo 'bar` office hours event is scheduled to start <t:1234:R>! ",
                 "[Click here](<http://link>) for more."
             )
         );
@@ -1894,7 +1894,7 @@ mod test {
         assert_eq!(
             msg,
             concat!(
-                "The `baz!` office hours event is starting at <t:1234:f>! ",
+                "The `baz!` office hours event is scheduled to start <t:1234:R>! ",
                 "[Click here](<http://link>) for more. /cc <@1234>, <@4321>"
             )
         );
@@ -1920,7 +1920,7 @@ mod test {
         assert_eq!(
             msg,
             concat!(
-                "The `Foo 'bar` office hours event is starting at <t:1234:f>! ",
+                "The `Foo 'bar` office hours event is scheduled to start <t:1234:R>! ",
                 "[Click here](<http://link>) for more. Extra info: `'foo!`."
             )
         );
