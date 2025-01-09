@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use clap::Parser;
 use log::{error, info, warn};
-use structopt::StructOpt;
 use tokio::sync::watch;
 
 mod calendar_events;
@@ -215,18 +215,18 @@ fn init_logger_or_die() {
     logger.init().unwrap();
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opts {
-    #[structopt(long)]
+    #[clap(long)]
     discord_token: String,
-    #[structopt(long)]
+    #[clap(long)]
     database: String,
 }
 
 fn main() -> Result<()> {
     init_logger_or_die();
     let client = new_reqwest_client()?;
-    let opts = Opts::from_args();
+    let opts = Opts::parse();
     let storage = storage::Storage::from_file(&opts.database)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
