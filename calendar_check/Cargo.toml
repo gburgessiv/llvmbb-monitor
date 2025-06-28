@@ -2,6 +2,9 @@
 name = "calendar_check"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Google Calendar utils for LLVM buildbot monitoring"
+authors = ["George Burgess IV <george.burgess.iv@gmail.com>"]
 
 [dependencies]
 anyhow = "1.0.95"
