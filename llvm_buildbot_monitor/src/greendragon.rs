@@ -36,9 +36,7 @@ where
         .and_then(|x| x.error_for_status())
         .with_context(|| format!("requesting {path}"))?;
 
-    resp.json()
-        .await
-        .with_context(|| format!("parsing {path}"))
+    resp.json().await.with_context(|| format!("parsing {path}"))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -237,42 +235,42 @@ async fn fetch_single_bot_status_snapshot(
         last_first_failing = None;
     }
 
-    let first_failing_build: Option<CompletedBuild> =
-        match (status.last_successful_build, status.last_unsuccessful_build) {
-            (None, None) => {
-                warn!(
+    let first_failing_build: Option<CompletedBuild> = match (
+        status.last_successful_build,
+        status.last_unsuccessful_build,
+    ) {
+        (None, None) => {
+            warn!(
                     "Bot {name} had last build ID {last_build_id}, but no successful/unsuccessful builds"
                 );
-                return Ok(None);
-            }
-            (Some(_), None) => None,
-            (None, Some(u)) => Some(match last_first_failing {
-                Some(x) => x.clone(),
-                None => {
-                    find_first_failing_build(client, name, &status.builds, None, u.number).await?
-                }
-            }),
+            return Ok(None);
+        }
+        (Some(_), None) => None,
+        (None, Some(u)) => Some(match last_first_failing {
+            Some(x) => x.clone(),
+            None => find_first_failing_build(client, name, &status.builds, None, u.number).await?,
+        }),
 
-            (Some(s), Some(u)) => {
-                if u.number > s.number {
-                    match last_first_failing {
-                        Some(x) => Some(x.clone()),
-                        None => Some(
-                            find_first_failing_build(
-                                client,
-                                name,
-                                &status.builds,
-                                Some(s.number),
-                                u.number,
-                            )
-                            .await?,
-                        ),
-                    }
-                } else {
-                    None
+        (Some(s), Some(u)) => {
+            if u.number > s.number {
+                match last_first_failing {
+                    Some(x) => Some(x.clone()),
+                    None => Some(
+                        find_first_failing_build(
+                            client,
+                            name,
+                            &status.builds,
+                            Some(s.number),
+                            u.number,
+                        )
+                        .await?,
+                    ),
                 }
+            } else {
+                None
             }
-        };
+        }
+    };
 
     let most_recent_build = fetch_completed_build(client, name, last_build_id).await?;
     Ok(Some(Bot {

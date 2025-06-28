@@ -282,9 +282,7 @@ pub(crate) async fn run_calendar_forever(
         // N.B., This is the only sender, so a simple `.borrow()` here instead of
         // `.borrow().clone()` is fine.
         let next_refresh = calculate_next_refresh_time(&state_sender.borrow());
-        info!(
-            "Calendar refresh scheduling: waiting until {next_refresh:?} for next refresh."
-        );
+        info!("Calendar refresh scheduling: waiting until {next_refresh:?} for next refresh.");
         let sleep_dur = next_refresh - Utc::now();
         // If this returns Err, the time for sleeping has passed.
         if let Ok(sleep_dur) = sleep_dur.to_std() {
