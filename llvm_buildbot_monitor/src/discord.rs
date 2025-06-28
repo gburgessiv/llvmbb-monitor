@@ -288,9 +288,7 @@ fn build_community_event_announce_message(
         }
 
         if !yet_to_mention.is_empty() {
-            warn!(
-                "Failed to find user(s) in event: {yet_to_mention:?}; ignoring"
-            );
+            warn!("Failed to find user(s) in event: {yet_to_mention:?}; ignoring");
         }
 
         // Mention everyone in sorted order by nickname (falling back to username)
@@ -980,9 +978,7 @@ impl MessageHandler {
         {
             Ok(_) => format!("OK! {raw_email} has been added as your email."),
             Err(x) => {
-                error!(
-                    "Failed adding email {raw_email:?} for #{from_uid}: {x}"
-                );
+                error!("Failed adding email {raw_email:?} for #{from_uid}: {x}");
                 "Internal error :(".into()
             }
         }
@@ -1031,9 +1027,7 @@ impl MessageHandler {
         {
             Ok(removed) => removed,
             Err(x) => {
-                error!(
-                    "Failed adding email {raw_email:?} for #{from_uid}: {x}"
-                );
+                error!("Failed adding email {raw_email:?} for #{from_uid}: {x}");
                 return "Internal error :(".into();
             }
         };
@@ -1247,9 +1241,7 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("list-emails") => Some(self.handle_list_emails(from_uid)),
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
             Some(_) | None => {
-                info!(
-                    "Received a DM-ish message; not sure what to do with it: {content:?}"
-                );
+                info!("Received a DM-ish message; not sure what to do with it: {content:?}");
                 None
             }
         };

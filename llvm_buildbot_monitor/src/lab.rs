@@ -110,10 +110,7 @@ where
             Ok(x) => x,
         };
 
-        return resp
-            .json()
-            .await
-            .with_context(|| format!("parsing {url}"));
+        return resp.json().await.with_context(|| format!("parsing {url}"));
     }
 }
 
@@ -182,9 +179,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
                 use std::convert::TryInto;
                 match value.try_into() {
                     Ok(x) => self.visit_i64(x),
-                    Err(_) => Err(E::custom(format!(
-                        "{value} is an invalid buildbot result"
-                    ))),
+                    Err(_) => Err(E::custom(format!("{value} is an invalid buildbot result"))),
                 }
             }
 
@@ -963,9 +958,7 @@ async fn perform_incremental_builder_sync(
                 )
             }
             None => {
-                warn!(
-                    "Previous state had no builds for {bot_id:?}; full-sync'ing it"
-                );
+                warn!("Previous state had no builds for {bot_id:?}; full-sync'ing it");
                 let bot_info = fetch_builder_info(client, bot_id).await?;
                 warn!("Synced {:?}'s name == {:?}", bot_id, bot_info.name,);
                 let bot = match fetch_builder_build_info(client, bot_id).await? {
@@ -973,9 +966,7 @@ async fn perform_incremental_builder_sync(
                         resolve_builder_build_info(client, &bot_info, &build_info).await?
                     }
                     None => {
-                        warn!(
-                            "...Somehow, {bot_id:?} had no builds? Full syncing everything."
-                        );
+                        warn!("...Somehow, {bot_id:?} had no builds? Full syncing everything.");
                         return perform_initial_builder_sync(client).await;
                     }
                 };

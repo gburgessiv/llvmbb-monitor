@@ -138,9 +138,7 @@ fn parse_event_description_data(
 ) -> Option<CommunityEventDescriptionData> {
     let event_description = match description_html_to_text(event_description_html) {
         Err(x) => {
-            warn!(
-                "Failed converting event description for {event_title:?} to text: {x}"
-            );
+            warn!("Failed converting event description for {event_title:?} to text: {x}");
             return None;
         }
         Ok(x) => x,
