@@ -260,7 +260,7 @@ fn build_community_event_announce_message(
         write!(
             &mut result,
             " Extra info: `{}`.",
-            sanitize_event_text(&extra_info),
+            sanitize_event_text(extra_info),
         )
         .unwrap();
     }
@@ -289,8 +289,7 @@ fn build_community_event_announce_message(
 
         if !yet_to_mention.is_empty() {
             warn!(
-                "Failed to find user(s) in event: {:?}; ignoring",
-                yet_to_mention
+                "Failed to find user(s) in event: {yet_to_mention:?}; ignoring"
             );
         }
 
@@ -305,7 +304,7 @@ fn build_community_event_announce_message(
         } else {
             result += ", ";
         }
-        write!(&mut result, "<@{}>", user_id).unwrap();
+        write!(&mut result, "<@{user_id}>").unwrap();
     }
     return result;
 
@@ -374,8 +373,7 @@ impl ChannelEventBroadcaster {
                 Some(x) => channel_ids.push(x),
                 None => {
                     warn!(
-                        "Unknown channel name {name:?} found in event with title {:?}",
-                        broadcast_title
+                        "Unknown channel name {name:?} found in event with title {broadcast_title:?}"
                     );
                 }
             }
@@ -470,8 +468,7 @@ impl ChannelEventBroadcaster {
 
                     if let Err(e) = channel_id.send_message(http, message).await {
                         error!(
-                            "Failed sending message chunk about cal event to channel {:?}: {e}",
-                            channel_id
+                            "Failed sending message chunk about cal event to channel {channel_id:?}: {e}"
                         );
                         break;
                     }
@@ -570,7 +567,7 @@ impl<'a> BlamelistCache<'a> {
 
         let to_blame = user_ids
             .into_iter()
-            .map(|x| format!("<@{}>", x))
+            .map(|x| format!("<@{x}>"))
             .chain(emails.into_iter().map(discord_safe_email));
 
         *target += " (blamelist: ";
@@ -693,7 +690,7 @@ impl ChannelServer {
         let new_messages = messages
             .iter()
             .map(|x| x.borrow())
-            .chain(std::iter::repeat(empty_message).take(padding_messages));
+            .chain(std::iter::repeat_n(empty_message, padding_messages));
 
         let mut num_messages = 0;
         for (i, data) in new_messages.enumerate() {
@@ -748,8 +745,7 @@ impl ChannelServer {
 
             write!(
                 current_message,
-                "**New build breakage in {}/{}**: <",
-                bot_category, bot_name,
+                "**New build breakage in {bot_category}/{bot_name}**: <",
             )
             .unwrap();
             match &next_breakage.bot_id {
@@ -841,9 +837,7 @@ impl ChannelServer {
             let new_most_recent_id = messages.iter().map(|x| x.id).max().unwrap();
             debug_assert!(
                 new_most_recent_id > most_recent_id,
-                "{} <= {}?",
-                new_most_recent_id,
-                most_recent_id
+                "{new_most_recent_id} <= {most_recent_id}?"
             );
             most_recent_id = new_most_recent_id;
 
@@ -975,7 +969,7 @@ impl MessageHandler {
 
         let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
             Some(x) => x,
-            None => return format!("Invalid email address: {:?}", raw_email),
+            None => return format!("Invalid email address: {raw_email:?}"),
         };
 
         match self
@@ -984,11 +978,10 @@ impl MessageHandler {
             .unwrap()
             .add_user_email_mapping(from_uid, &email)
         {
-            Ok(_) => format!("OK! {} has been added as your email.", raw_email),
+            Ok(_) => format!("OK! {raw_email} has been added as your email."),
             Err(x) => {
                 error!(
-                    "Failed adding email {:?} for #{}: {}",
-                    raw_email, from_uid, x
+                    "Failed adding email {raw_email:?} for #{from_uid}: {x}"
                 );
                 "Internal error :(".into()
             }
@@ -999,7 +992,7 @@ impl MessageHandler {
         let mut emails = match self.storage.lock().unwrap().find_emails_for(from_uid) {
             Ok(x) => x,
             Err(x) => {
-                error!("Failed finding emails for #{}: {}", from_uid, x);
+                error!("Failed finding emails for #{from_uid}: {x}");
                 return "Internal error :(".into();
             }
         };
@@ -1027,7 +1020,7 @@ impl MessageHandler {
 
         let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
             Some(x) => x,
-            None => return format!("Invalid email address: {:?}", raw_email),
+            None => return format!("Invalid email address: {raw_email:?}"),
         };
 
         let removed = match self
@@ -1039,17 +1032,16 @@ impl MessageHandler {
             Ok(removed) => removed,
             Err(x) => {
                 error!(
-                    "Failed adding email {:?} for #{}: {}",
-                    raw_email, from_uid, x
+                    "Failed adding email {raw_email:?} for #{from_uid}: {x}"
                 );
                 return "Internal error :(".into();
             }
         };
 
         if removed {
-            format!("OK! {} has been removed from your account.", raw_email)
+            format!("OK! {raw_email} has been removed from your account.")
         } else {
-            format!("I didn't have {} on file for you.", raw_email)
+            format!("I didn't have {raw_email} on file for you.")
         }
     }
 }
@@ -1084,11 +1076,11 @@ impl serenity::client::EventHandler for MessageHandler {
         let find_channel_id = |name: &str| match guild.channels.iter().find(|(_, x)| x.name == name)
         {
             Some((x, _)) => {
-                info!("Identified #{} as my channel in #{}", x, guild_id);
+                info!("Identified #{x} as my channel in #{guild_id}");
                 Some(*x)
             }
             None => {
-                error!("No {} channel in #{}; quit", name, guild_id);
+                error!("No {name} channel in #{guild_id}; quit");
                 None
             }
         };
@@ -1159,9 +1151,9 @@ impl serenity::client::EventHandler for MessageHandler {
                     event_reader,
                 };
                 loop {
-                    info!("Setting up event broadcasting for guild #{}", guild_id);
+                    info!("Setting up event broadcasting for guild #{guild_id}");
                     if let Err(x) = broadcaster.serve(&http, &*should_exit).await {
-                        error!("Failed broadcasting events for guild #{}: {}", guild_id, x);
+                        error!("Failed broadcasting events for guild #{guild_id}: {x}");
                     }
 
                     if should_exit() {
@@ -1178,7 +1170,7 @@ impl serenity::client::EventHandler for MessageHandler {
                     }
                 }
 
-                info!("Shut down event broadcasting for #{}", guild_id);
+                info!("Shut down event broadcasting for #{guild_id}");
             });
         }
 
@@ -1197,9 +1189,9 @@ impl serenity::client::EventHandler for MessageHandler {
                 storage,
             };
             loop {
-                info!("Setting up bot status serving for guild #{}", guild_id);
+                info!("Setting up bot status serving for guild #{guild_id}");
                 if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
-                    error!("Failed serving bot status for guild #{}: {}", guild_id, x);
+                    error!("Failed serving bot status for guild #{guild_id}: {x}");
                 }
 
                 if should_exit() {
@@ -1216,7 +1208,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
             }
 
-            info!("Shut down bot status serving for #{}", guild_id);
+            info!("Shut down bot status serving for #{guild_id}");
         });
     }
 
@@ -1256,8 +1248,7 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
             Some(_) | None => {
                 info!(
-                    "Received a DM-ish message; not sure what to do with it: {:?}",
-                    content
+                    "Received a DM-ish message; not sure what to do with it: {content:?}"
                 );
                 None
             }
@@ -1288,7 +1279,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 .direct_message(&ctx, builder::CreateMessage::new().content(msg))
                 .await
             {
-                error!("Failed to respond to user message: {}", x);
+                error!("Failed to respond to user message: {x}");
                 break;
             }
         }
@@ -1467,8 +1458,7 @@ impl StatusUIUpdater {
         result += "**Bot summary:**";
         write!(
             result,
-            "\n{} of {} online bots are broken",
-            num_red_bots, num_bots
+            "\n{num_red_bots} of {num_bots} online bots are broken"
         )
         .unwrap();
 
@@ -1583,12 +1573,11 @@ impl StatusUIUpdater {
             failed_bots.reverse();
 
             this_message.clear();
-            write!(this_message, "**Broken for `{}`**:", category_name).unwrap();
+            write!(this_message, "**Broken for `{category_name}`**:").unwrap();
             for (bot_id, first_failed_id, first_failed_time) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
-                        "Apparently {:?} failed in the future (current time = {})",
-                        bot_id, start_time
+                        "Apparently {bot_id:?} failed in the future (current time = {start_time})"
                     );
                     (chrono::Duration::microseconds(0), "?m".into())
                 } else {
@@ -1776,10 +1765,7 @@ mod test {
             let n = m.chars().count();
             assert!(
                 n <= size,
-                "{:?} has {} chars, which is above the size threshold of {}",
-                m,
-                n,
-                size
+                "{m:?} has {n} chars, which is above the size threshold of {size}"
             );
         }
         messages

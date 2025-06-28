@@ -34,11 +34,11 @@ where
         .send()
         .await
         .and_then(|x| x.error_for_status())
-        .with_context(|| format!("requesting {}", path))?;
+        .with_context(|| format!("requesting {path}"))?;
 
     resp.json()
         .await
-        .with_context(|| format!("parsing {}", path))
+        .with_context(|| format!("parsing {path}"))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -90,7 +90,7 @@ impl serde::de::Visitor<'_> for ColorVisitor {
             }
         }
 
-        Err(E::custom(format!("{:?} isn't a valid color", s)))
+        Err(E::custom(format!("{s:?} isn't a valid color")))
     }
 }
 
@@ -136,7 +136,7 @@ async fn find_first_failing_build(
     debug_assert!(is_sorted_by(build_list, |x, y| x.number < y.number));
 
     let search_start: usize = if let Some(s) = last_successful {
-        assert!(last_failure > s, "{} should be > {}", last_failure, s);
+        assert!(last_failure > s, "{last_failure} should be > {s}");
         match build_list.binary_search_by_key(&s, |x| x.number) {
             Ok(n) => n + 1,
             Err(n) => n,
@@ -152,8 +152,7 @@ async fn find_first_failing_build(
                 if let Some(x) = root_cause.downcast_ref::<reqwest::Error>() {
                     if x.status() == Some(reqwest::StatusCode::NOT_FOUND) {
                         info!(
-                            "Finding first failing build for {:?} 404'ed on {}; trying another...",
-                            bot_name, build_number
+                            "Finding first failing build for {bot_name:?} 404'ed on {build_number}; trying another..."
                         );
                         continue;
                     }
@@ -214,7 +213,7 @@ async fn fetch_single_bot_status_snapshot(
 ) -> Result<Option<Bot>> {
     let status: RawBotStatus = {
         let mut status: RawBotStatus =
-            json_get(client, &format!("/green/view/All/job/{}/api/json", name)).await?;
+            json_get(client, &format!("/green/view/All/job/{name}/api/json")).await?;
         status.builds.sort_unstable_by_key(|x| x.number);
         status
     };
@@ -242,8 +241,7 @@ async fn fetch_single_bot_status_snapshot(
         match (status.last_successful_build, status.last_unsuccessful_build) {
             (None, None) => {
                 warn!(
-                    "Bot {} had last build ID {}, but no successful/unsuccessful builds",
-                    name, last_build_id
+                    "Bot {name} had last build ID {last_build_id}, but no successful/unsuccessful builds"
                 );
                 return Ok(None);
             }
@@ -351,7 +349,7 @@ impl<'de> Deserialize<'de> for RawBuildResult {
                     "SUCCESS" => Ok(RawBuildResult::Success),
                     "FAILURE" => Ok(RawBuildResult::Failure),
                     "UNSTABLE" => Ok(RawBuildResult::Unstable),
-                    _ => Err(E::custom(format!("{:?} isn't a valid RawBuildResult", s))),
+                    _ => Err(E::custom(format!("{s:?} isn't a valid RawBuildResult"))),
                 }
             }
         }
@@ -408,7 +406,7 @@ async fn fetch_completed_build(
     id: BuildNumber,
 ) -> Result<CompletedBuild> {
     let data: BuildResult =
-        json_get(client, &format!("green/job/{}/{}/api/json", bot_name, id)).await?;
+        json_get(client, &format!("green/job/{bot_name}/{id}/api/json")).await?;
 
     let mut blamelist = Vec::new();
     let all_change_sets: Vec<ChangeSetListing>;

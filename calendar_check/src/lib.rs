@@ -139,8 +139,7 @@ fn parse_event_description_data(
     let event_description = match description_html_to_text(event_description_html) {
         Err(x) => {
             warn!(
-                "Failed converting event description for {:?} to text: {}",
-                event_title, x
+                "Failed converting event description for {event_title:?} to text: {x}"
             );
             return None;
         }
@@ -156,7 +155,7 @@ fn parse_event_description_data(
     let mut extra_message = None;
 
     for line in event_description.lines() {
-        if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", &line) {
+        if let Some(line) = strip_prefix_once(&event_type, "discord-bot-event-type:", line) {
             let line = remove_comment(line).trim();
             let e = match line {
                 "office-hours" => CommunityEventType::OfficeHours,
@@ -171,7 +170,7 @@ fn parse_event_description_data(
         }
 
         if let Some(line) =
-            strip_prefix_once(&event_channels, "discord-bot-channels-to-mention:", &line)
+            strip_prefix_once(&event_channels, "discord-bot-channels-to-mention:", line)
         {
             let mut channels = Vec::new();
             for channel in remove_comment(line).split(',') {
@@ -186,7 +185,7 @@ fn parse_event_description_data(
             continue;
         }
 
-        if let Some(line) = strip_prefix_once(&event_mention, "discord-bot-mention:", &line) {
+        if let Some(line) = strip_prefix_once(&event_mention, "discord-bot-mention:", line) {
             let mut users = Vec::new();
             for user in remove_comment(line).split(',') {
                 let user = user.trim();
@@ -203,7 +202,7 @@ fn parse_event_description_data(
         if let Some(line) = strip_prefix_once(
             &event_reminder,
             "discord-bot-reminder-time-before-start:",
-            &line,
+            line,
         ) {
             let line = remove_comment(line).trim();
             match line.parse() {
@@ -217,7 +216,7 @@ fn parse_event_description_data(
             continue;
         }
 
-        if let Some(line) = strip_prefix_once(&extra_message, "discord-bot-message:", &line) {
+        if let Some(line) = strip_prefix_once(&extra_message, "discord-bot-message:", line) {
             let line = line.trim();
             extra_message = Some(line.into());
             continue;
