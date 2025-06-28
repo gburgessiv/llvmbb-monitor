@@ -99,14 +99,13 @@ where
                 // over it.
                 if attempt_number < max_attempts && is_incomplete_message_error(&x) {
                     warn!(
-                        "Request to {:?} failed due to apparent connection shutdown; retrying: {}",
-                        url, x,
+                        "Request to {url:?} failed due to apparent connection shutdown; retrying: {x}",
                     );
                     attempt_number += 1;
                     continue;
                 }
 
-                return Err(anyhow::Error::new(x).context(format!("requesting {}", url)));
+                return Err(anyhow::Error::new(x).context(format!("requesting {url}")));
             }
             Ok(x) => x,
         };
@@ -114,7 +113,7 @@ where
         return resp
             .json()
             .await
-            .with_context(|| format!("parsing {}", url));
+            .with_context(|| format!("parsing {url}"));
     }
 }
 
@@ -137,7 +136,7 @@ struct BuildersResult {
 
 async fn fetch_builder_info(client: &reqwest::Client, id: BotID) -> Result<BuilderInfo> {
     let mut builders =
-        json_get_api::<BuildersResult>(client, &HOST.join(&format!("builders/{}", id))?)
+        json_get_api::<BuildersResult>(client, &HOST.join(&format!("builders/{id}"))?)
             .await?
             .builders;
 
@@ -184,8 +183,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
                 match value.try_into() {
                     Ok(x) => self.visit_i64(x),
                     Err(_) => Err(E::custom(format!(
-                        "{} is an invalid buildbot result",
-                        value
+                        "{value} is an invalid buildbot result"
                     ))),
                 }
             }
@@ -204,7 +202,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotResult {
                     5 => Ok(RawBuildbotResult(BuildbotResult::Exception)),
                     // 6 is technically 'CANCELLED'. For our purposes, that's an exception.
                     6 => Ok(RawBuildbotResult(BuildbotResult::Exception)),
-                    n => Err(E::custom(format!("{} is an invalid buildbot result", n))),
+                    n => Err(E::custom(format!("{n} is an invalid buildbot result"))),
                 }
             }
         }
@@ -237,7 +235,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
                 let nanos = ((value - secs as f64) * 1_000_000_000f64) as u32;
                 match chrono::DateTime::from_timestamp(secs, nanos) {
                     Some(x) => Ok(RawBuildbotTime(x)),
-                    None => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                    None => Err(E::custom(format!("{value} is an invalid timestamp"))),
                 }
             }
 
@@ -248,7 +246,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
                 use std::convert::TryInto;
                 match value.try_into() {
                     Ok(x) => self.visit_i64(x),
-                    Err(_) => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                    Err(_) => Err(E::custom(format!("{value} is an invalid timestamp"))),
                 }
             }
 
@@ -259,7 +257,7 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
                 let secs = value;
                 match chrono::DateTime::from_timestamp(secs, 0) {
                     Some(x) => Ok(RawBuildbotTime(x)),
-                    None => Err(E::custom(format!("{} is an invalid timestamp", value))),
+                    None => Err(E::custom(format!("{value} is an invalid timestamp"))),
                 }
             }
         }
@@ -326,7 +324,7 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
     client: T,
     builder_id: BotID,
 ) -> Result<Option<BuilderBuildInfo>> {
-    debug!("Fetching builder info for {}", builder_id);
+    debug!("Fetching builder info for {builder_id}");
 
     let fetch_amount = 25;
     // If we have to go more than this many builds back, really, we're done.
@@ -335,7 +333,7 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
 
     let fetch_amount_str = fetch_amount.to_string();
     let mut pending_builds = Vec::new();
-    let mut query_url = HOST.join(&format!("builders/{}/builds", builder_id))?;
+    let mut query_url = HOST.join(&format!("builders/{builder_id}/builds"))?;
     for start in (0..max_fetch).step_by(fetch_amount) {
         query_url
             .query_pairs_mut()
@@ -668,7 +666,7 @@ async fn perform_initial_builder_sync(
                 async move {
                     fetch_builder_build_info(client, builder_id)
                         .await
-                        .with_context(|| format!("fetching builder {} status", builder_id))
+                        .with_context(|| format!("fetching builder {builder_id} status"))
                 }
             },
         )
@@ -966,8 +964,7 @@ async fn perform_incremental_builder_sync(
             }
             None => {
                 warn!(
-                    "Previous state had no builds for {:?}; full-sync'ing it",
-                    bot_id
+                    "Previous state had no builds for {bot_id:?}; full-sync'ing it"
                 );
                 let bot_info = fetch_builder_info(client, bot_id).await?;
                 warn!("Synced {:?}'s name == {:?}", bot_id, bot_info.name,);
@@ -977,8 +974,7 @@ async fn perform_incremental_builder_sync(
                     }
                     None => {
                         warn!(
-                            "...Somehow, {:?} had no builds? Full syncing everything.",
-                            bot_id
+                            "...Somehow, {bot_id:?} had no builds? Full syncing everything."
                         );
                         return perform_initial_builder_sync(client).await;
                     }
@@ -1005,8 +1001,7 @@ async fn perform_incremental_builder_sync(
             let completion_time = &bot.1.status.most_recent_build.completion_time;
             if *completion_time < drop_builder_if_before {
                 info!(
-                    "Dropping {:?}; its most recent build is too old (completed at {})",
-                    name, completion_time
+                    "Dropping {name:?}; its most recent build is too old (completed at {completion_time})"
                 );
                 false
             } else {

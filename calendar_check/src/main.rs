@@ -19,7 +19,7 @@ async fn run() -> Result<()> {
     .await
     .context("fetching LLVM office hour events")?;
 
-    println!("{:#?}", events);
+    println!("{events:#?}");
     Ok(())
 }
 

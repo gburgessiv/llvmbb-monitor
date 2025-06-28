@@ -128,7 +128,7 @@ async fn publish_forever(
                 update_success = true;
             }
             Err(x) => {
-                error!("Updating lab bot statuses failed:\n{:?}", x);
+                error!("Updating lab bot statuses failed:\n{x:?}");
             }
         }
 
@@ -138,7 +138,7 @@ async fn publish_forever(
                 update_success = true;
             }
             Err(x) => {
-                error!("Updating greendragon bot statuses failed:\n{:?}", x);
+                error!("Updating greendragon bot statuses failed:\n{x:?}");
             }
         };
 
@@ -149,7 +149,7 @@ async fn publish_forever(
                     client = x;
                 }
                 Err(x) => {
-                    error!("Failed making new reqwest client; reusing old: {}", x);
+                    error!("Failed making new reqwest client; reusing old: {x}");
                 }
             }
             continue;
