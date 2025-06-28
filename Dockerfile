@@ -52,7 +52,9 @@ RUN \
   cargo clean
 
 # Bring in sources & test go brrr.
-COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor .git/ code/
+COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/ code/calendar_check/
+COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/llvm_buildbot_monitor/
+COPY --chown=llvmbb_monitor:llvmbb_monitor .git/ code/.git
 RUN cd code && cargo test
 
 # Release build container.
