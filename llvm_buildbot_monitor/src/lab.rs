@@ -526,12 +526,12 @@ async fn fetch_build_blamelist(
 
     let mut rs: Vec<Email> = results
         .into_iter()
-        .filter_map(|x| match Email::parse(remove_name_from_email(&x.author)) {
-            Some(x) => Some(x),
-            None => {
+        .filter_map(|x| {
+            let Some(x) = Email::parse(remove_name_from_email(&x.author)) else {
                 warn!("Failed parsing email {:?} -- oh, well.", x.author);
-                None
-            }
+                return None;
+            };
+            Some(x)
         })
         .collect();
 

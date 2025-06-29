@@ -960,9 +960,8 @@ impl MessageHandler {
     }
 
     fn handle_add_email(&self, from_uid: UserId, email: Option<&str>) -> String {
-        let raw_email = match email {
-            Some(x) => x,
-            None => return "Need an email.".into(),
+        let Some(raw_email) = email else {
+            return "Need an email.".into();
         };
 
         let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
@@ -1009,9 +1008,8 @@ impl MessageHandler {
     }
 
     fn handle_remove_email(&self, from_uid: UserId, email: Option<&str>) -> String {
-        let raw_email = match email {
-            Some(x) => x,
-            None => return "Need an email.".into(),
+        let Some(raw_email) = email else {
+            return "Need an email.".into();
         };
 
         let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {

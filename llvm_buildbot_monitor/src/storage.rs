@@ -105,10 +105,10 @@ impl Storage {
         let mut result = Vec::new();
         for elem in iter {
             let elem = elem?;
-            result.push(match Email::parse(&elem) {
-                Some(x) => x,
-                None => bail!("Invalid email address in db: {:?}", elem),
-            });
+            let Some(x) = Email::parse(&elem) else {
+                bail!("Invalid email address in db: {:?}", elem);
+            };
+            result.push(x);
         }
         Ok(result)
     }
