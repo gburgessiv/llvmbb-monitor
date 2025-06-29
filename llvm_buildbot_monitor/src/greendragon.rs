@@ -407,12 +407,11 @@ async fn fetch_completed_build(
         json_get(client, &format!("green/job/{bot_name}/{id}/api/json")).await?;
 
     let mut blamelist = Vec::new();
-    let all_change_sets: Vec<ChangeSetListing>;
-    if let Some(x) = data.change_set {
-        all_change_sets = vec![x];
+    let all_change_sets = if let Some(x) = data.change_set {
+        vec![x]
     } else {
-        all_change_sets = data.change_sets;
-    }
+        data.change_sets
+    };
     for change_sets in all_change_sets {
         for change_set in change_sets.items {
             match Email::parse(&change_set.author_email) {
