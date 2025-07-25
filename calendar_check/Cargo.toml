@@ -1,7 +1,7 @@
 [package]
 name = "calendar_check"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 description = "Google Calendar utils for LLVM buildbot monitoring"
 authors = ["George Burgess IV <george.burgess.iv@gmail.com>"]
