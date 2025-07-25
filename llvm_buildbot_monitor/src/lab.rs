@@ -8,7 +8,7 @@ use crate::Email;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
