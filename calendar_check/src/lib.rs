@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{debug, warn};
-use serde::de::Deserializer;
 use serde::Deserialize;
+use serde::de::Deserializer;
 
 type UtcTime = chrono::DateTime<chrono::Utc>;
 

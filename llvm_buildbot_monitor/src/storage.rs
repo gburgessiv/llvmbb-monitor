@@ -3,7 +3,7 @@ use crate::Email;
 use std::cmp::min;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rusqlite::params;
 use serenity::model::prelude::UserId;
 

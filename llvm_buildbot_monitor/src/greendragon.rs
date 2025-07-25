@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::result;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use lazy_static::lazy_static;
 use log::{error, info, warn};
 use serde::Deserialize;
@@ -241,8 +241,8 @@ async fn fetch_single_bot_status_snapshot(
     ) {
         (None, None) => {
             warn!(
-                    "Bot {name} had last build ID {last_build_id}, but no successful/unsuccessful builds"
-                );
+                "Bot {name} had last build ID {last_build_id}, but no successful/unsuccessful builds"
+            );
             return Ok(None);
         }
         (Some(_), None) => None,
