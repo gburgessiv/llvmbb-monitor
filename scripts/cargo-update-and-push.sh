@@ -10,8 +10,11 @@ fi
 
 cargo update
 cargo test
+if git rev-parse cargo-update 2>/dev/null >/dev/null; then
+  git branch -D cargo-update
+fi
+git checkout -b cargo-update
 git commit -a -m 'Run cargo-update'
-git checkout -B cargo-update
 git push --set-upstream github HEAD:cargo-update
 
 pr_url=$(gh pr create \
