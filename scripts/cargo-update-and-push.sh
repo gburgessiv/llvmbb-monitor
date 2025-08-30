@@ -24,10 +24,7 @@ fi
 
 cargo update
 cargo test
-if git rev-parse "${branch_name}" 2>/dev/null >/dev/null; then
-  git branch -D "${branch_name}"
-fi
-git checkout -b "${branch_name}"
+git checkout -B "${branch_name}"
 git commit -a -m 'Run cargo-update'
 git push --set-upstream github HEAD:"${branch_name}"
 
