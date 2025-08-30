@@ -148,12 +148,13 @@ async fn find_first_failing_build(
             Err(x) => {
                 let root_cause = x.root_cause();
                 if let Some(x) = root_cause.downcast_ref::<reqwest::Error>()
-                    && x.status() == Some(reqwest::StatusCode::NOT_FOUND) {
-                        info!(
-                            "Finding first failing build for {bot_name:?} 404'ed on {build_number}; trying another..."
-                        );
-                        continue;
-                    }
+                    && x.status() == Some(reqwest::StatusCode::NOT_FOUND)
+                {
+                    info!(
+                        "Finding first failing build for {bot_name:?} 404'ed on {build_number}; trying another..."
+                    );
+                    continue;
+                }
                 return Err(x);
             }
             Ok(x) => {
