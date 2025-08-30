@@ -8,14 +8,28 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
+git fetch
+branch_name=cargo-update
+
+if [[ "$(git branch -r)" == *"github/${branch_name}"* ]]; then
+  echo "Deleting remote branch..."
+  git push github --delete "${branch_name}"
+fi
+
+if [[ "$(git branch --show-current 2>&1 || :)" != "main" ]]; then
+  echo "Switching to main..."
+  git switch main
+  git pull
+fi
+
 cargo update
 cargo test
-if git rev-parse cargo-update 2>/dev/null >/dev/null; then
-  git branch -D cargo-update
+if git rev-parse "${branch_name}" 2>/dev/null >/dev/null; then
+  git branch -D "${branch_name}"
 fi
-git checkout -b cargo-update
+git checkout -b "${branch_name}"
 git commit -a -m 'Run cargo-update'
-git push --set-upstream github HEAD:cargo-update
+git push --set-upstream github HEAD:"${branch_name}"
 
 pr_url=$(gh pr create \
   --title='Run cargo-update' \
