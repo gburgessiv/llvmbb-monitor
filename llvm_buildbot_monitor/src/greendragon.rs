@@ -14,12 +14,6 @@ use lazy_static::lazy_static;
 use log::{error, info, warn};
 use serde::Deserialize;
 
-#[derive(Deserialize)]
-struct UnabridgedBuildStatus;
-
-#[derive(Deserialize)]
-struct UnabridgedBuilderStatus;
-
 lazy_static! {
     static ref HOST: reqwest::Url =
         reqwest::Url::parse("http://green.lab.llvm.org").expect("parsing greendragon URL");
