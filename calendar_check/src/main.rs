@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use log::LevelFilter;
 
 #[derive(Parser)]
 struct Args {
@@ -29,11 +30,11 @@ fn main() -> Result<()> {
 
     simple_logger::SimpleLogger::new()
         .with_level(if args.debug {
-            log::LevelFilter::Debug
+            LevelFilter::Debug
         } else {
-            log::LevelFilter::Info
+            LevelFilter::Info
         })
-        .with_module_level("html5ever", log::LevelFilter::Warn)
+        .with_module_level("html5ever", LevelFilter::Warn)
         .init()
         .unwrap();
 
