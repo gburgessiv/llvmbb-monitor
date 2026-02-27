@@ -27,12 +27,15 @@ async fn run(days_to_fetch: u64) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    simple_logger::init_with_level(if args.debug {
-        log::Level::Debug
-    } else {
-        log::Level::Info
-    })
-    .unwrap();
+    simple_logger::SimpleLogger::new()
+        .with_level(if args.debug {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
+        .with_module_level("html5ever", log::LevelFilter::Warn)
+        .init()
+        .unwrap();
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

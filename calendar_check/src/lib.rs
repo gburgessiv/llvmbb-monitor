@@ -144,6 +144,7 @@ fn parse_event_description_data(
         Ok(x) => x,
     };
 
+    log::debug!("HTML Description for {event_title:?} was {event_description_html:?}");
     log::info!("Description for {event_title:?} was {event_description:?}");
 
     let mut event_type = None;
