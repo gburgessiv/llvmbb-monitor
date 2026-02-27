@@ -577,4 +577,141 @@ mod test {
             baseline_time + Duration::from_secs(9 * 60) - PRE_PING_STATE_REFRESH_TIME,
         );
     }
+
+    #[test]
+    fn test_calculate_ping_time_subtracts_lead() {
+        let baseline_time = arbitrary_time();
+        let make_event = |ping_duration_before_start_mins: u32| CommunityEvent {
+            start_time: baseline_time,
+            end_time: baseline_time + Duration::from_secs(3600),
+            id: "e".into(),
+            description_data: calendar_check::CommunityEventDescriptionData {
+                ping_duration_before_start_mins,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Non-zero lead: ping time is shifted before start.
+        assert_eq!(
+            calculate_ping_time(&make_event(10)),
+            baseline_time - Duration::from_secs(10 * 60),
+        );
+
+        // Zero lead: ping time equals start time.
+        assert_eq!(calculate_ping_time(&make_event(0)), baseline_time);
+    }
+
+    #[test]
+    fn test_calculate_event_ping_data_empty_events() {
+        let baseline_time = arbitrary_time();
+        let state = State {
+            events: Vec::new(),
+            refreshed_at: baseline_time,
+        };
+        let (to_ping, next_ping) =
+            calculate_event_ping_data(&state, &baseline_time, &Default::default());
+        assert!(to_ping.is_empty(), "{to_ping:?}");
+        assert_eq!(next_ping, None);
+    }
+
+    #[test]
+    fn test_calculate_event_ping_data_all_due_none_remaining() {
+        let baseline_time = arbitrary_time();
+        // Events start 1s and 2s after `now`, but their ping windows (5 min lead)
+        // have already passed, so both should be in `ping_now_indices` and no
+        // future ping should be scheduled.
+        let now = baseline_time + Duration::from_secs(10 * 60);
+        let state = State {
+            events: vec![
+                CommunityEvent {
+                    start_time: now + Duration::from_secs(1),
+                    end_time: now + Duration::from_secs(3600),
+                    id: "a".into(),
+                    description_data: calendar_check::CommunityEventDescriptionData {
+                        ping_duration_before_start_mins: 5,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                CommunityEvent {
+                    start_time: now + Duration::from_secs(2),
+                    end_time: now + Duration::from_secs(3600),
+                    id: "b".into(),
+                    description_data: calendar_check::CommunityEventDescriptionData {
+                        ping_duration_before_start_mins: 5,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            refreshed_at: baseline_time,
+        };
+        let (to_ping, next_ping) = calculate_event_ping_data(&state, &now, &Default::default());
+        assert_eq!(&to_ping, &[0, 1]);
+        assert_eq!(next_ping, None);
+    }
+
+    #[test]
+    fn test_calculate_event_ping_data_nonzero_lead_shifts_nearest_ping() {
+        let baseline_time = arbitrary_time();
+        let state = State {
+            events: vec![
+                CommunityEvent {
+                    // ping_time = baseline + 5min (20min start - 15min lead)
+                    start_time: baseline_time + Duration::from_secs(20 * 60),
+                    end_time: baseline_time + Duration::from_secs(3600),
+                    id: "in-20-min".into(),
+                    description_data: calendar_check::CommunityEventDescriptionData {
+                        ping_duration_before_start_mins: 15,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                CommunityEvent {
+                    // ping_time = baseline + 25min (30min start - 5min lead)
+                    start_time: baseline_time + Duration::from_secs(30 * 60),
+                    end_time: baseline_time + Duration::from_secs(3600),
+                    id: "in-30-min".into(),
+                    description_data: calendar_check::CommunityEventDescriptionData {
+                        ping_duration_before_start_mins: 5,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            refreshed_at: baseline_time,
+        };
+
+        let now = baseline_time;
+        let (to_ping, next_ping) = calculate_event_ping_data(&state, &now, &Default::default());
+        assert!(to_ping.is_empty(), "{to_ping:?}");
+        // The nearest ping is the one shifted the most by a large lead time.
+        assert_eq!(next_ping, Some(baseline_time + Duration::from_secs(5 * 60)),);
+    }
+
+    #[test]
+    fn test_state_refresh_cadence_wins_over_distant_pre_ping_refresh() {
+        let baseline_time = arbitrary_time();
+        // Event is 90 minutes away with a 1-minute ping lead:
+        //   ping_time           = baseline + 89min
+        //   pre-ping refresh_at = baseline + 87min  (89min - PRE_PING_STATE_REFRESH_TIME=2min)
+        // 87min > 60min hourly cadence, so the cadence should win.
+        let state = State {
+            events: vec![CommunityEvent {
+                start_time: baseline_time + Duration::from_secs(90 * 60),
+                end_time: baseline_time + Duration::from_secs(120 * 60),
+                description_data: calendar_check::CommunityEventDescriptionData {
+                    ping_duration_before_start_mins: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            refreshed_at: baseline_time,
+        };
+        assert_eq!(
+            calculate_next_refresh_time(&state),
+            baseline_time + Duration::from_secs(60 * 60),
+        );
+    }
 }

@@ -1032,15 +1032,123 @@ pub(crate) async fn fetch_new_status_snapshot(
 mod test {
     use super::*;
 
+    // Helper to reduce boilerplate in category tests.
+    fn builder(name: &str, tags: &[&str]) -> BuilderInfo {
+        BuilderInfo {
+            id: 0,
+            name: name.to_string(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // --- remove_name_from_email ---
+
     #[test]
-    fn test_category_determinations() {
+    fn test_remove_name_from_email_with_display_name() {
+        assert_eq!(
+            "foo@bar.com",
+            remove_name_from_email("Foo Bar <foo@bar.com>")
+        );
+    }
+
+    #[test]
+    fn test_remove_name_from_email_plain_address_unchanged() {
+        assert_eq!("foo@bar.com", remove_name_from_email("foo@bar.com"));
+    }
+
+    #[test]
+    fn test_remove_name_from_email_angle_brackets_only() {
+        assert_eq!("foo@bar.com", remove_name_from_email("<foo@bar.com>"));
+    }
+
+    #[test]
+    fn test_remove_name_from_email_only_close_bracket() {
+        // No opening '<', so the string should pass through unchanged.
+        assert_eq!("foo@bar.com>", remove_name_from_email("foo@bar.com>"));
+    }
+
+    #[test]
+    fn test_remove_name_from_email_embedded_gt_before_angle() {
+        // The comment in the source mentions "foo bar <x at y dot com>" style inputs, but here
+        // we verify that an embedded '>' before the final '<...>' pair is handled correctly by
+        // rfind picking the last '<'.
+        assert_eq!("x@y.com", remove_name_from_email("foo > bar <x@y.com>"));
+    }
+
+    #[test]
+    fn test_remove_name_from_email_empty_string() {
+        assert_eq!("", remove_name_from_email(""));
+    }
+
+    // --- determine_bot_category ---
+
+    #[test]
+    fn test_category_single_tag_wins_directly() {
+        assert_eq!(
+            Some("clang"),
+            determine_bot_category(&builder("clang-x86_64-ubuntu", &["clang"]))
+        );
+    }
+
+    #[test]
+    fn test_category_toolchain_tag_beats_others() {
+        assert_eq!(
+            Some("toolchain"),
+            determine_bot_category(&builder("clang-toolchain-x86", &["clang", "toolchain"]))
+        );
+    }
+
+    #[test]
+    fn test_category_clang_tools_tag_beats_others() {
+        assert_eq!(
+            Some("clang-tools"),
+            determine_bot_category(&builder("clang-tools-extra-x86", &["clang", "clang-tools"]))
+        );
+    }
+
+    #[test]
+    fn test_category_name_scan_clang_beats_llvm() {
+        // "clang" is earlier in the importance list than "llvm", so it should win.
+        assert_eq!(
+            Some("clang"),
+            determine_bot_category(&builder("llvm-clang-foo-bar", &["llvm", "docs"]))
+        );
+    }
+
+    #[test]
+    fn test_category_name_scan_existing_test_case() {
+        // Preserves the original test: no 'clang' token in the name, so 'llvm' wins.
         assert_eq!(
             Some("llvm"),
-            determine_bot_category(&BuilderInfo {
-                id: 123,
-                name: "llvm-sphinx-docs".to_string(),
-                tags: vec!["llvm".into(), "docs".into()],
-            })
+            determine_bot_category(&builder("llvm-sphinx-docs", &["llvm", "docs"]))
+        );
+    }
+
+    #[test]
+    fn test_category_name_scan_single_match() {
+        assert_eq!(
+            Some("lld"),
+            determine_bot_category(&builder("ppc64le-lld-foo-bar", &["lld", "other"]))
+        );
+    }
+
+    #[test]
+    fn test_category_name_scan_polly() {
+        // Example from the source comment.
+        assert_eq!(
+            Some("polly"),
+            determine_bot_category(&builder(
+                "aosp-O3-polly-before-vectorizer-unprofitable",
+                &["unrelated", "tags"]
+            ))
+        );
+    }
+
+    #[test]
+    fn test_category_no_match_returns_none() {
+        assert_eq!(
+            None,
+            determine_bot_category(&builder("windows-msvc-amd64", &["tag1", "tag2"]))
         );
     }
 }

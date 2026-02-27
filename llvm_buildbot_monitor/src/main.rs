@@ -54,6 +54,16 @@ impl Email {
     fn address(&self) -> &str {
         &self.address
     }
+
+    #[cfg(test)]
+    fn from_parts(account: &str, domain: &str) -> Email {
+        let address = format!("{account}@{domain}");
+        let at_loc = account.len();
+        Email {
+            address: address.into_boxed_str(),
+            at_loc,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -239,4 +249,60 @@ fn main() -> Result<()> {
         tokio_rt,
         storage,
     )
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::Email;
+
+    #[test]
+    fn parse_valid_email() {
+        assert_eq!(
+            Email::parse("foo@example.com"),
+            Some(Email::from_parts("foo", "example.com"))
+        );
+    }
+
+    #[test]
+    fn parse_lowercases_address() {
+        assert_eq!(
+            Email::parse("User@Example.COM"),
+            Some(Email::from_parts("user", "example.com"))
+        );
+    }
+
+    #[test]
+    fn parse_no_at_returns_none() {
+        assert!(Email::parse("notanemail").is_none());
+        assert!(Email::parse("").is_none());
+    }
+
+    #[test]
+    fn parse_multiple_at_signs_uses_first() {
+        // Per RFC 5321/5322, '@' in the local-part requires quoting, so "a@b@c"
+        // is not a valid address. This test just documents current behavior on
+        // malformed input.
+        assert_eq!(Email::parse("a@b@c"), Some(Email::from_parts("a", "b@c")));
+    }
+
+    #[test]
+    fn parse_plus_in_account() {
+        assert_eq!(
+            Email::parse("foo+bar@example.com"),
+            Some(Email::from_parts("foo+bar", "example.com"))
+        );
+    }
+
+    #[test]
+    fn parse_edge_cases_with_empty_parts() {
+        // '@' only — both account and domain are empty slices.
+        assert_eq!(Email::parse("@"), Some(Email::from_parts("", "")));
+        // Empty account.
+        assert_eq!(
+            Email::parse("@domain.com"),
+            Some(Email::from_parts("", "domain.com"))
+        );
+        // Empty domain.
+        assert_eq!(Email::parse("user@"), Some(Email::from_parts("user", "")));
+    }
 }
