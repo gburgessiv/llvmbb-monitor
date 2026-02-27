@@ -7,14 +7,15 @@ use clap::Parser;
 struct Args {
     #[clap(long)]
     debug: bool,
+    #[clap(long, default_value_t = 14)]
+    days_to_fetch: u64,
 }
 
-async fn run() -> Result<()> {
+async fn run(days_to_fetch: u64) -> Result<()> {
     let events = calendar_check::fetch_near_llvm_calendar_office_hour_events(
         &reqwest::Client::new(),
         &chrono::Utc::now(),
-        // Fetch a few weeks out. Doubt anyone will care about more than that.
-        Duration::from_secs(14 * 24 * 60 * 60),
+        Duration::from_secs(days_to_fetch * 24 * 60 * 60),
     )
     .await
     .context("fetching LLVM office hour events")?;
@@ -37,5 +38,5 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?
-        .block_on(run())
+        .block_on(run(args.days_to_fetch))
 }
