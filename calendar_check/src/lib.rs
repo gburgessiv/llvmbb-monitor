@@ -14,14 +14,14 @@ fn utc_time_to_api_time(time: &UtcTime) -> String {
     time.to_rfc3339_opts(chrono::SecondsFormat::Secs, use_z)
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum CommunityEventType {
     #[default]
     OfficeHours,
     SyncUp,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommunityEventDescriptionData {
     /// Type of the event, as specified by the user.
     pub event_type: CommunityEventType,
@@ -423,9 +423,106 @@ pub async fn fetch_near_llvm_calendar_office_hour_events(
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     #[test]
     fn test_reqwest_url_parses() {
         // This has an internal `unwrap`. If it doesn't crash, we're all good.
         let _ = super::get_baseline_llvm_calendar_url();
+    }
+
+    #[test]
+    fn test_parse_plain_text_basic() {
+        // Minimal valid plain-text description.
+        let basic_plain_text = "\
+discord-bot-event-type: office-hours
+discord-bot-channels-to-mention: #llvm-officehours
+discord-bot-mention: @alice, @bob
+";
+        assert_eq!(
+            parse_event_description_data("My Event", basic_plain_text),
+            Some(CommunityEventDescriptionData {
+                event_type: CommunityEventType::OfficeHours,
+                mention_channels: vec!["llvm-officehours".into()],
+                mention_users: vec!["alice".into(), "bob".into()],
+                ping_duration_before_start_mins: 30,
+                extra_message: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn test_parse_plain_text_sync_up_and_all_fields() {
+        let desc = "\
+discord-bot-event-type: sync-up
+discord-bot-channels-to-mention: #general, #announcements
+discord-bot-mention: @carol
+discord-bot-reminder-time-before-start: 15
+discord-bot-message: Don't forget!
+";
+        assert_eq!(
+            parse_event_description_data("Sync", desc),
+            Some(CommunityEventDescriptionData {
+                event_type: CommunityEventType::SyncUp,
+                mention_channels: vec!["general".into(), "announcements".into()],
+                mention_users: vec!["carol".into()],
+                ping_duration_before_start_mins: 15,
+                extra_message: Some("Don't forget!".into()),
+            }),
+        );
+    }
+
+    #[test]
+    fn test_parse_no_event_type_returns_none() {
+        let desc = "discord-bot-channels-to-mention: #llvm-officehours\n";
+        assert!(parse_event_description_data("My Event", desc).is_none());
+    }
+
+    #[test]
+    fn test_parse_empty_description_returns_none() {
+        assert!(parse_event_description_data("My Event", "").is_none());
+    }
+
+    #[test]
+    fn test_parse_invalid_event_type_returns_none() {
+        let desc = "discord-bot-event-type: totally-made-up\n";
+        assert!(parse_event_description_data("My Event", desc).is_none());
+    }
+
+    #[test]
+    fn test_parse_html_description() {
+        // Same content as basic_plain_text but wrapped in HTML with <br> line breaks.
+        let html = "\
+discord-bot-event-type: office-hours <br>\
+discord-bot-channels-to-mention: #llvm-officehours<br>\
+discord-bot-mention: @alice<br>";
+        assert_eq!(
+            parse_event_description_data("My Event", html),
+            Some(CommunityEventDescriptionData {
+                event_type: CommunityEventType::OfficeHours,
+                mention_channels: vec!["llvm-officehours".into()],
+                mention_users: vec!["alice".into()],
+                ping_duration_before_start_mins: 30,
+                extra_message: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn test_parse_comments_stripped() {
+        let desc = "\
+discord-bot-event-type: office-hours // this is a comment
+discord-bot-channels-to-mention: #llvm-officehours // another comment
+";
+        assert_eq!(
+            parse_event_description_data("My Event", desc),
+            Some(CommunityEventDescriptionData {
+                event_type: CommunityEventType::OfficeHours,
+                mention_channels: vec!["llvm-officehours".into()],
+                mention_users: vec![],
+                ping_duration_before_start_mins: 30,
+                extra_message: None,
+            }),
+        );
     }
 }
