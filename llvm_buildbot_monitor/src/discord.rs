@@ -1877,6 +1877,71 @@ mod test {
     }
 
     #[test]
+    fn test_duration_to_shorthand() {
+        // Sub-minute
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::seconds(0)),
+            "<1 minute"
+        );
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::seconds(59)),
+            "<1 minute"
+        );
+
+        // Minutes - boundary
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::seconds(60)),
+            "1 minute"
+        );
+        // Minutes - singular (anything in [60s, 120s) rounds down to 1)
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::seconds(119)),
+            "1 minute"
+        );
+        // Minutes - plural
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::seconds(120)),
+            "2 minutes"
+        );
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::minutes(59)),
+            "59 minutes"
+        );
+
+        // Hours - boundary
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::minutes(60)),
+            "1 hour"
+        );
+        // Hours - singular (anything in [60m, 120m))
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::minutes(119)),
+            "1 hour"
+        );
+        // Hours - plural
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::minutes(120)),
+            "2 hours"
+        );
+        assert_eq!(
+            duration_to_shorthand(chrono::Duration::hours(23)),
+            "23 hours"
+        );
+
+        // Days - boundary
+        assert_eq!(duration_to_shorthand(chrono::Duration::hours(24)), "1 day");
+        // Days - singular
+        assert_eq!(duration_to_shorthand(chrono::Duration::hours(47)), "1 day");
+        // Days - plural
+        assert_eq!(duration_to_shorthand(chrono::Duration::hours(48)), "2 days");
+        assert_eq!(duration_to_shorthand(chrono::Duration::days(27)), "27 days");
+
+        // Weeks - boundary (28 days = 4 weeks)
+        assert_eq!(duration_to_shorthand(chrono::Duration::days(28)), "4 weeks");
+        assert_eq!(duration_to_shorthand(chrono::Duration::days(35)), "5 weeks");
+    }
+
+    #[test]
     fn test_announcement_message_generation_adds_extra_info() {
         use chrono::DateTime;
 
