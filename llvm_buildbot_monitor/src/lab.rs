@@ -1111,10 +1111,7 @@ mod test {
         // "clang" is earlier in the importance list than "llvm", so it should win.
         assert_eq!(
             Some("clang"),
-            determine_bot_category(&builder(
-                "llvm-clang-foo-bar",
-                &["llvm".into(), "docs".into()]
-            ))
+            determine_bot_category(&builder("llvm-clang-foo-bar", &["llvm", "docs"]))
         );
     }
 
