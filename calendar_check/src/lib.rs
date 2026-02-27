@@ -136,6 +136,14 @@ fn parse_event_description_data(
     event_title: &str,
     event_description_html: &str,
 ) -> Option<CommunityEventDescriptionData> {
+    // The description field may be plain text or HTML; the API offers no indication which is the
+    // case.
+    //
+    // Try as text first, then fall back to HTML parsing if that fails.
+    if let Some(result) = parse_event_description_data_impl(event_title, event_description_html) {
+        return Some(result);
+    }
+    log::debug!("Parsing {event_title:?} description as text failed; trying as HTML...");
     let event_description = match description_html_to_text(event_description_html) {
         Err(x) => {
             warn!("Failed converting event description for {event_title:?} to text: {x}");
@@ -143,8 +151,13 @@ fn parse_event_description_data(
         }
         Ok(x) => x,
     };
+    parse_event_description_data_impl(event_title, &event_description)
+}
 
-    log::debug!("HTML Description for {event_title:?} was {event_description_html:?}");
+fn parse_event_description_data_impl(
+    event_title: &str,
+    event_description: &str,
+) -> Option<CommunityEventDescriptionData> {
     log::info!("Description for {event_title:?} was {event_description:?}");
 
     let mut event_type = None;
