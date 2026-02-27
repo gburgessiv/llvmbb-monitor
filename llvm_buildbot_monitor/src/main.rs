@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use log::{error, info, warn};
+use log::{LevelFilter, error, info, warn};
 use tokio::sync::watch;
 
 mod calendar_events;
@@ -202,14 +202,14 @@ async fn publish_forever(
 fn init_logger_or_die() {
     let mut logger = simple_logger::SimpleLogger::new()
         .with_utc_timestamps()
-        .with_level(log::LevelFilter::Warn);
-    // Hyper and reqwest give a loot of `DEBUG` information.
+        .with_level(LevelFilter::Warn);
+    // Hyper and reqwest give a lot of `DEBUG` information.
     logger = logger.with_module_level(
         "llvm_buildbot_monitor",
         if cfg!(debug_assertions) {
-            log::LevelFilter::Debug
+            LevelFilter::Debug
         } else {
-            log::LevelFilter::Info
+            LevelFilter::Info
         },
     );
     logger.init().unwrap();
