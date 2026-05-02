@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use log::{LevelFilter, error, info, warn};
 use tokio::sync::watch;
@@ -227,23 +227,115 @@ fn init_logger_or_die() {
 
 #[derive(Parser)]
 struct Opts {
+    /// Discord token to use. Required unless a --debug-only-fetch-* flag is set.
+    #[clap(long, required_unless_present_any = ["debug_only_fetch_greendragon", "debug_only_fetch_lab"])]
+    discord_token: Option<String>,
+    /// Path to the database to use. Required unless a --debug-only-fetch-* flag is set.
+    #[clap(long, required_unless_present_any = ["debug_only_fetch_greendragon", "debug_only_fetch_lab"])]
+    database: Option<String>,
+    /// Debugging command: don't start the discord bot, just fetch a GreenDragon snapshot and print metrics to stdout.
     #[clap(long)]
-    discord_token: String,
+    debug_only_fetch_greendragon: bool,
+    /// Debugging command: don't start the discord bot, just fetch a Lab snapshot and print metrics to stdout.
     #[clap(long)]
-    database: String,
+    debug_only_fetch_lab: bool,
+}
+
+async fn run_debug_only_fetch(
+    client: &reqwest::Client,
+    fetch_greendragon: bool,
+    fetch_lab: bool,
+) -> Result<()> {
+    let mut had_errors = false;
+    if fetch_lab {
+        let lab_result =
+            lab::fetch_new_status_snapshot(client, &mut None, &Default::default()).await;
+        println!("=== Lab ===");
+        match lab_result {
+            Err(e) => {
+                println!("  ERROR: {e:?}");
+                had_errors = true;
+            }
+            Ok(snapshot) => {
+                let mut bots: Vec<_> = snapshot.values().collect();
+                bots.sort_by(|a, b| a.0.cmp(&b.0));
+                for (name, bot) in bots {
+                    let status = if bot.status.first_failing_build.is_some() {
+                        "FAIL"
+                    } else {
+                        "ok"
+                    };
+                    let online = if bot.status.is_online {
+                        "online"
+                    } else {
+                        "offline"
+                    };
+                    println!("  [{status:4}] [{online:7}] {name}");
+                }
+            }
+        }
+    }
+
+    if fetch_greendragon {
+        let greendragon_result =
+            greendragon::fetch_new_status_snapshot(client, &Default::default()).await;
+        println!("=== GreenDragon ===");
+        match greendragon_result {
+            Err(e) => {
+                println!("  ERROR: {e:?}");
+                had_errors = true;
+            }
+            Ok(snapshot) => {
+                let mut bots: Vec<_> = snapshot.iter().collect();
+                bots.sort_by_key(|(name, _)| name.as_str());
+                for (name, bot) in bots {
+                    let status = if bot.status.first_failing_build.is_some() {
+                        "FAIL"
+                    } else {
+                        "ok"
+                    };
+                    let online = if bot.status.is_online {
+                        "online"
+                    } else {
+                        "offline"
+                    };
+                    println!("  [{status:4}] [{online:7}] {name}");
+                }
+            }
+        }
+    }
+
+    if had_errors {
+        bail!("fetch errors, see above");
+    }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
     init_logger_or_die();
     let client = new_reqwest_client()?;
     let opts = Opts::parse();
-    let storage = storage::Storage::from_file(&opts.database)?;
     let tokio_rt = tokio::runtime::Runtime::new()?;
+
+    if opts.debug_only_fetch_greendragon || opts.debug_only_fetch_lab {
+        return tokio_rt.block_on(run_debug_only_fetch(
+            &client,
+            opts.debug_only_fetch_greendragon,
+            opts.debug_only_fetch_lab,
+        ));
+    }
+
+    // If debug_only_fetch_* is not set, then these are guaranteed to be Some by clap.
+    let database = opts.database.as_ref().unwrap();
+    let discord_token = opts.discord_token.as_ref().unwrap();
+
+    let storage = storage::Storage::from_file(database)?;
     let (snapshots_tx, snapshots_rx) = watch::channel(None);
 
     tokio_rt.spawn(publish_forever(client, snapshots_tx));
     discord::run(
-        &opts.discord_token,
+        discord_token,
         git_version::git_version!(),
         snapshots_rx,
         tokio_rt,
