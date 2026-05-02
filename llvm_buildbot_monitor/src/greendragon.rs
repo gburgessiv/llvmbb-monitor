@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 lazy_static! {
     static ref HOST: reqwest::Url =
-        reqwest::Url::parse("http://green.lab.llvm.org").expect("parsing greendragon URL");
+        reqwest::Url::parse("https://green.lab.llvm.org").expect("parsing greendragon URL");
 }
 
 async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
@@ -35,7 +35,7 @@ where
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum Color {
-    // ...Which is a funny way of spelilng "Green"
+    // ...Which is a funny way of spelling "Green"
     Blue { flashing: bool },
     Disabled,
     Red { flashing: bool },
@@ -95,15 +95,23 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct SingleBotOverview {
+#[derive(Deserialize, Debug, Clone)]
+struct RawJob {
     name: String,
-    color: Color,
+    url: String,
+    color: Option<Color>,
+    #[serde(rename = "_class")]
+    class: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
-struct AllBotsOverview {
-    jobs: Vec<SingleBotOverview>,
+struct JobContainer {
+    jobs: Vec<RawJob>,
+}
+
+fn get_path_from_url(url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(url)?;
+    Ok(parsed.path().trim_end_matches('/').to_owned())
 }
 
 #[derive(Deserialize, Debug)]
@@ -113,7 +121,7 @@ struct RawStatusBuild {
 
 async fn find_first_failing_build(
     client: &reqwest::Client,
-    bot_name: &str,
+    job_path: &str,
     build_list: &[RawStatusBuild],
     last_successful: Option<BuildNumber>,
     last_failure: BuildNumber,
@@ -131,14 +139,14 @@ async fn find_first_failing_build(
     };
 
     for build_number in build_list[search_start..].iter().map(|x| x.number) {
-        match fetch_completed_build(client, bot_name, build_number).await {
+        match fetch_completed_build(client, job_path, build_number).await {
             Err(x) => {
                 let root_cause = x.root_cause();
                 if let Some(x) = root_cause.downcast_ref::<reqwest::Error>()
                     && x.status() == Some(reqwest::StatusCode::NOT_FOUND)
                 {
                     info!(
-                        "Finding first failing build for {bot_name:?} 404'ed on {build_number}; trying another..."
+                        "Finding first failing build for {job_path:?} 404'ed on {build_number}; trying another..."
                     );
                     continue;
                 }
@@ -153,7 +161,7 @@ async fn find_first_failing_build(
                         "Lies? Build {:?}/{} is reported successful, when it should've ",
                         "failed. Most recent successful == {:?}.",
                     ),
-                    bot_name, build_number, last_successful
+                    job_path, build_number, last_successful
                 );
             }
         }
@@ -165,7 +173,7 @@ async fn find_first_failing_build(
     bail!(
         "no available builds > {:?} for {:?} (candidates: {:?})",
         last_successful,
-        bot_name,
+        job_path,
         candidates
     );
 }
@@ -193,12 +201,11 @@ struct RawBotStatus {
 async fn fetch_single_bot_status_snapshot(
     client: &reqwest::Client,
     prev: Option<&Bot>,
-    name: &str,
+    job_path: &str,
     color: Color,
 ) -> Result<Option<Bot>> {
     let status: RawBotStatus = {
-        let mut status: RawBotStatus =
-            json_get(client, &format!("/green/view/All/job/{name}/api/json")).await?;
+        let mut status: RawBotStatus = json_get(client, &format!("{job_path}/api/json")).await?;
         status.builds.sort_unstable_by_key(|x| x.number);
         status
     };
@@ -228,14 +235,16 @@ async fn fetch_single_bot_status_snapshot(
     ) {
         (None, None) => {
             warn!(
-                "Bot {name} had last build ID {last_build_id}, but no successful/unsuccessful builds"
+                "Bot {job_path} had last build ID {last_build_id}, but no successful/unsuccessful builds"
             );
             return Ok(None);
         }
         (Some(_), None) => None,
         (None, Some(u)) => Some(match last_first_failing {
             Some(x) => x.clone(),
-            None => find_first_failing_build(client, name, &status.builds, None, u.number).await?,
+            None => {
+                find_first_failing_build(client, job_path, &status.builds, None, u.number).await?
+            }
         }),
 
         (Some(s), Some(u)) => {
@@ -245,7 +254,7 @@ async fn fetch_single_bot_status_snapshot(
                     None => Some(
                         find_first_failing_build(
                             client,
-                            name,
+                            job_path,
                             &status.builds,
                             Some(s.number),
                             u.number,
@@ -259,7 +268,7 @@ async fn fetch_single_bot_status_snapshot(
         }
     };
 
-    let most_recent_build = fetch_completed_build(client, name, last_build_id).await?;
+    let most_recent_build = fetch_completed_build(client, job_path, last_build_id).await?;
     Ok(Some(Bot {
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
         // categories, too?
@@ -281,21 +290,41 @@ pub(crate) async fn fetch_new_status_snapshot(
 ) -> Result<HashMap<String, Bot>> {
     let mut result = HashMap::new();
 
+    let mut to_process = Vec::new();
+
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
     // great idea.
-    for bot in json_get::<AllBotsOverview>(client, "/green/view/All%20build%20groups/api/json")
-        .await?
-        .jobs
-    {
-        match fetch_single_bot_status_snapshot(client, prev.get(&bot.name), &bot.name, bot.color)
-            .await?
-        {
-            None => {
-                // OK then.
+    let overview: JobContainer = json_get(client, "/job/llvm.org/view/All/api/json").await?;
+    for bot in overview.jobs {
+        to_process.push((bot.name.clone(), bot));
+    }
+
+    let mut i = 0;
+    while i < to_process.len() {
+        let (display_name, job) = to_process[i].clone();
+        i += 1;
+
+        let path = get_path_from_url(&job.url)?;
+
+        if let Some(color) = job.color {
+            if let Some(bot) =
+                fetch_single_bot_status_snapshot(client, prev.get(&display_name), &path, color)
+                    .await?
+            {
+                result.insert(display_name, bot);
             }
-            Some(x) => {
-                result.insert(bot.name, x);
+        } else if let Some(class) = &job.class {
+            if class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject" {
+                let container: JobContainer = json_get(client, &format!("{path}/api/json")).await?;
+                for sub_job in container.jobs {
+                    // We only care about the main branch for these, usually.
+                    // But some might have other important branches.
+                    // Let's include everything that has a color.
+                    if sub_job.color.is_some() {
+                        to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
+                    }
+                }
             }
         }
     }
@@ -387,11 +416,10 @@ struct BuildResult {
 
 async fn fetch_completed_build(
     client: &reqwest::Client,
-    bot_name: &str,
+    job_path: &str,
     id: BuildNumber,
 ) -> Result<CompletedBuild> {
-    let data: BuildResult =
-        json_get(client, &format!("green/job/{bot_name}/{id}/api/json")).await?;
+    let data: BuildResult = json_get(client, &format!("{job_path}/{id}/api/json")).await?;
 
     let mut blamelist = Vec::new();
     let all_change_sets = if let Some(x) = data.change_set {
