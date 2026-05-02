@@ -42,17 +42,8 @@ Running `docker build -t llvm_buildbot_monitor .` in this directory will produce
 a docker image that gets you the majority of the way there.
 
 The only thing missing is credentials and database info, which are both
-specified during `docker run`. My `docker run` command looks something like:
-
-```
-docker run \
-  --rm \
-  --env DISCORD_TOKEN="${MY_DISCORD_TOKEN}" \
-  -v "${PATH_TO_DIR_CONTAINING_DB_FILE}:/db"
-  -v "${HOME}/llvmbb_logs:/logs"
-  --it \
-  llvm_buildbot_monitor
-```
+specified during `docker run`. My `docker run` command for testing is kept
+in the `scripts/run-staging-bot.sh` file.
 
 Notes:
   - The default db file is called `db.sqlite3`. I store it in db/ within
