@@ -91,6 +91,7 @@ struct BotStatus {
 struct Bot {
     category: String,
     status: BotStatus,
+    url: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
