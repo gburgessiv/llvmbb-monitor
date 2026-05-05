@@ -688,7 +688,7 @@ async fn perform_initial_builder_sync(
             MAX_CONCURRENCY,
             builder_infos
                 .into_iter()
-                .zip(actual_builds.into_iter())
+                .zip(actual_builds)
                 .filter_map(|(bot_info, status)| match status {
                     None => {
                         info!("Dropping {:?}; it has no builds", bot_info.name);
@@ -781,7 +781,7 @@ async fn fetch_latest_build_statuses(
             .builds;
 
         let stop = page.len() < fetch_amount || page.iter().any(|x| x.build_id <= stop_at);
-        results.extend(page.into_iter());
+        results.extend(page);
         if stop {
             return Ok(results);
         }
@@ -850,7 +850,7 @@ async fn perform_incremental_builder_sync(
 
     let newly_completed_builds: Vec<CompletedLabBuild> = build_status_snapshot
         .into_iter()
-        .chain(missed_builds.into_iter())
+        .chain(missed_builds)
         .filter(|x| {
             x.build_id > prev_state.most_recent_build
                 || previously_pending_builds.contains(&x.build_id)
