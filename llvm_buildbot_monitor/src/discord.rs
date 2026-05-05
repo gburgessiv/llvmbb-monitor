@@ -673,7 +673,7 @@ impl ChannelServer {
     async fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
         let (ui, new_breakages) = receiver.next().await;
         self.ui = Some(ui.clone());
-        self.unsent_breakages.extend(new_breakages.into_iter());
+        self.unsent_breakages.extend(new_breakages);
         ui
     }
 
