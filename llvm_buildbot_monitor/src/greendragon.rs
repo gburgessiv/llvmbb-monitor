@@ -203,6 +203,7 @@ async fn fetch_single_bot_status_snapshot(
     prev: Option<&Bot>,
     job_path: &str,
     color: Color,
+    url: &str,
 ) -> Result<Option<Bot>> {
     let status: RawBotStatus = {
         let mut status: RawBotStatus = json_get(client, &format!("{job_path}/api/json")).await?;
@@ -273,6 +274,7 @@ async fn fetch_single_bot_status_snapshot(
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
         // categories, too?
         category: "GreenDragon".to_owned(),
+        url: url.to_owned(),
         status: BotStatus {
             first_failing_build,
             most_recent_build,
@@ -308,22 +310,27 @@ pub(crate) async fn fetch_new_status_snapshot(
         let path = get_path_from_url(&job.url)?;
 
         if let Some(color) = job.color {
-            if let Some(bot) =
-                fetch_single_bot_status_snapshot(client, prev.get(&display_name), &path, color)
-                    .await?
+            if let Some(bot) = fetch_single_bot_status_snapshot(
+                client,
+                prev.get(&display_name),
+                &path,
+                color,
+                &job.url,
+            )
+            .await?
             {
                 result.insert(display_name, bot);
             }
-        } else if let Some(class) = &job.class {
-            if class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject" {
-                let container: JobContainer = json_get(client, &format!("{path}/api/json")).await?;
-                for sub_job in container.jobs {
-                    // We only care about the main branch for these, usually.
-                    // But some might have other important branches.
-                    // Let's include everything that has a color.
-                    if sub_job.color.is_some() {
-                        to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
-                    }
+        } else if let Some(class) = &job.class
+            && class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
+        {
+            let container: JobContainer = json_get(client, &format!("{path}/api/json")).await?;
+            for sub_job in container.jobs {
+                // We only care about the main branch for these, usually.
+                // But some might have other important branches.
+                // Let's include everything that has a color.
+                if sub_job.color.is_some() {
+                    to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
                 }
             }
         }
