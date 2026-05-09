@@ -16,21 +16,24 @@ use serde::Deserialize;
 
 lazy_static! {
     static ref HOST: reqwest::Url =
-        reqwest::Url::parse("https://ci.swift.org").expect("parsing greendragon URL");
+        reqwest::Url::parse("https://green.lab.llvm.org").expect("parsing greendragon URL");
 }
 
-async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
+async fn json_get<T>(client: &reqwest::Client, url: reqwest::Url) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
+    let url_str = url.to_string();
     let resp = client
-        .get(HOST.join(path)?)
+        .get(url)
         .send()
         .await
         .and_then(|x| x.error_for_status())
-        .with_context(|| format!("requesting {path}"))?;
+        .with_context(|| format!("requesting {url_str}"))?;
 
-    resp.json().await.with_context(|| format!("parsing {path}"))
+    resp.json()
+        .await
+        .with_context(|| format!("parsing {url_str}"))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -109,11 +112,6 @@ struct JobContainer {
     jobs: Vec<RawJob>,
 }
 
-fn get_path_from_url(url: &str) -> Result<String> {
-    let parsed = reqwest::Url::parse(url)?;
-    Ok(parsed.path().trim_end_matches('/').to_owned())
-}
-
 #[derive(Deserialize, Debug)]
 struct RawStatusBuild {
     number: BuildNumber,
@@ -121,7 +119,7 @@ struct RawStatusBuild {
 
 async fn find_first_failing_build(
     client: &reqwest::Client,
-    job_path: &str,
+    job_url: &reqwest::Url,
     build_list: &[RawStatusBuild],
     last_successful: Option<BuildNumber>,
     last_failure: BuildNumber,
@@ -139,14 +137,14 @@ async fn find_first_failing_build(
     };
 
     for build_number in build_list[search_start..].iter().map(|x| x.number) {
-        match fetch_completed_build(client, job_path, build_number).await {
+        match fetch_completed_build(client, job_url, build_number).await {
             Err(x) => {
                 let root_cause = x.root_cause();
                 if let Some(x) = root_cause.downcast_ref::<reqwest::Error>()
                     && x.status() == Some(reqwest::StatusCode::NOT_FOUND)
                 {
                     info!(
-                        "Finding first failing build for {job_path:?} 404'ed on {build_number}; trying another..."
+                        "Finding first failing build for {job_url:?} 404'ed on {build_number}; trying another..."
                     );
                     continue;
                 }
@@ -161,7 +159,7 @@ async fn find_first_failing_build(
                         "Lies? Build {:?}/{} is reported successful, when it should've ",
                         "failed. Most recent successful == {:?}.",
                     ),
-                    job_path, build_number, last_successful
+                    job_url, build_number, last_successful
                 );
             }
         }
@@ -173,7 +171,7 @@ async fn find_first_failing_build(
     bail!(
         "no available builds > {:?} for {:?} (candidates: {:?})",
         last_successful,
-        job_path,
+        job_url,
         candidates
     );
 }
@@ -201,12 +199,18 @@ struct RawBotStatus {
 async fn fetch_single_bot_status_snapshot(
     client: &reqwest::Client,
     prev: Option<&Bot>,
-    job_path: &str,
+    job_url: reqwest::Url,
     color: Color,
-    url: &str,
 ) -> Result<Option<Bot>> {
     let status: RawBotStatus = {
-        let mut status: RawBotStatus = json_get(client, &format!("{job_path}/api/json")).await?;
+        let mut api_url = job_url.clone();
+        api_url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("invalid job URL"))?
+            .pop_if_empty()
+            .push("api")
+            .push("json");
+        let mut status: RawBotStatus = json_get(client, api_url).await?;
         status.builds.sort_unstable_by_key(|x| x.number);
         status
     };
@@ -236,7 +240,7 @@ async fn fetch_single_bot_status_snapshot(
     ) {
         (None, None) => {
             warn!(
-                "Bot {job_path} had last build ID {last_build_id}, but no successful/unsuccessful builds"
+                "Bot {job_url} had last build ID {last_build_id}, but no successful/unsuccessful builds"
             );
             return Ok(None);
         }
@@ -244,7 +248,7 @@ async fn fetch_single_bot_status_snapshot(
         (None, Some(u)) => Some(match last_first_failing {
             Some(x) => x.clone(),
             None => {
-                find_first_failing_build(client, job_path, &status.builds, None, u.number).await?
+                find_first_failing_build(client, &job_url, &status.builds, None, u.number).await?
             }
         }),
 
@@ -255,7 +259,7 @@ async fn fetch_single_bot_status_snapshot(
                     None => Some(
                         find_first_failing_build(
                             client,
-                            job_path,
+                            &job_url,
                             &status.builds,
                             Some(s.number),
                             u.number,
@@ -269,12 +273,12 @@ async fn fetch_single_bot_status_snapshot(
         }
     };
 
-    let most_recent_build = fetch_completed_build(client, job_path, last_build_id).await?;
+    let most_recent_build = fetch_completed_build(client, &job_url, last_build_id).await?;
     Ok(Some(Bot {
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
         // categories, too?
         category: "GreenDragon".to_owned(),
-        url: url.to_owned(),
+        url: job_url.to_string(),
         status: BotStatus {
             first_failing_build,
             most_recent_build,
@@ -297,7 +301,8 @@ pub(crate) async fn fetch_new_status_snapshot(
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
     // great idea.
-    let overview: JobContainer = json_get(client, "/job/llvm.org/view/All/api/json").await?;
+    let overview_url = HOST.join("/job/llvm.org/view/All/api/json")?;
+    let overview: JobContainer = json_get(client, overview_url).await?;
     for bot in overview.jobs {
         to_process.push((bot.name.clone(), bot));
     }
@@ -307,24 +312,29 @@ pub(crate) async fn fetch_new_status_snapshot(
         let (display_name, job) = to_process[i].clone();
         i += 1;
 
-        let path = get_path_from_url(&job.url)?;
+        let mut job_url = reqwest::Url::parse(&job.url)?;
+        if job_url.host_str() == Some("ci.swift.org") {
+            job_url.set_host(Some("green.lab.llvm.org"))?;
+        }
 
         if let Some(color) = job.color {
-            if let Some(bot) = fetch_single_bot_status_snapshot(
-                client,
-                prev.get(&display_name),
-                &path,
-                color,
-                &job.url,
-            )
-            .await?
+            if let Some(bot) =
+                fetch_single_bot_status_snapshot(client, prev.get(&display_name), job_url, color)
+                    .await?
             {
                 result.insert(display_name, bot);
             }
         } else if let Some(class) = &job.class
             && class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
         {
-            let container: JobContainer = json_get(client, &format!("{path}/api/json")).await?;
+            let mut api_url = job_url.clone();
+            api_url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("invalid job URL"))?
+                .pop_if_empty()
+                .push("api")
+                .push("json");
+            let container: JobContainer = json_get(client, api_url).await?;
             for sub_job in container.jobs {
                 // We only care about the main branch for these, usually.
                 // But some might have other important branches.
@@ -423,10 +433,18 @@ struct BuildResult {
 
 async fn fetch_completed_build(
     client: &reqwest::Client,
-    job_path: &str,
+    job_url: &reqwest::Url,
     id: BuildNumber,
 ) -> Result<CompletedBuild> {
-    let data: BuildResult = json_get(client, &format!("{job_path}/{id}/api/json")).await?;
+    let mut api_url = job_url.clone();
+    api_url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid job URL"))?
+        .pop_if_empty()
+        .push(&id.to_string())
+        .push("api")
+        .push("json");
+    let data: BuildResult = json_get(client, api_url).await?;
 
     let mut blamelist = Vec::new();
     let all_change_sets = if let Some(x) = data.change_set {
