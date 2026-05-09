@@ -107,6 +107,8 @@ struct BotStatusSnapshot {
 
 fn new_reqwest_client() -> Result<reqwest::Client> {
     Ok(reqwest::ClientBuilder::new()
+        .user_agent("llvm-buildbot-monitor/0.1.0")
+        .http1_only()
         // The lab can take a while to hand back results, but 60 seconds should be enough
         // for anybody.
         .timeout(Duration::from_secs(60))
