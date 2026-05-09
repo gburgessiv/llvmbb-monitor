@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 lazy_static! {
     static ref HOST: reqwest::Url =
-        reqwest::Url::parse("https://green.lab.llvm.org").expect("parsing greendragon URL");
+        reqwest::Url::parse("https://ci.swift.org").expect("parsing greendragon URL");
 }
 
 async fn json_get<T>(client: &reqwest::Client, url: reqwest::Url) -> Result<T>
@@ -220,10 +220,7 @@ async fn fetch_single_bot_status_snapshot(
     prev: Option<&Bot>,
     job: RawJob,
 ) -> Result<Option<Bot>> {
-    let mut job_url = reqwest::Url::parse(&job.url)?;
-    if job_url.host_str() == Some("ci.swift.org") {
-        job_url.set_host(Some("green.lab.llvm.org"))?;
-    }
+    let job_url = reqwest::Url::parse(&job.url)?;
 
     let last_build = match job.last_completed_build {
         Some(x) => x,
@@ -334,10 +331,7 @@ pub(crate) async fn fetch_new_status_snapshot(
             && (class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
                 || class == "com.cloudbees.hudson.plugins.folder.Folder")
         {
-            let mut job_url = reqwest::Url::parse(&job.url)?;
-            if job_url.host_str() == Some("ci.swift.org") {
-                job_url.set_host(Some("green.lab.llvm.org"))?;
-            }
+            let job_url = reqwest::Url::parse(&job.url)?;
             let mut api_url = job_url.clone();
             api_url
                 .path_segments_mut()
