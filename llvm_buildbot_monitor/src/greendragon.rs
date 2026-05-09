@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 lazy_static! {
     static ref HOST: reqwest::Url =
-        reqwest::Url::parse("https://green.lab.llvm.org").expect("parsing greendragon URL");
+        reqwest::Url::parse("https://ci.swift.org").expect("parsing greendragon URL");
 }
 
 async fn json_get<T>(client: &reqwest::Client, path: &str) -> Result<T>
