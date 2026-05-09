@@ -109,6 +109,7 @@ struct RawJob {
     last_completed_build: Option<BuildResultWithNumber>,
     last_successful_build: Option<RawStatusBuild>,
     last_unsuccessful_build: Option<RawStatusBuild>,
+    jobs: Option<Vec<RawJob>>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -304,7 +305,8 @@ pub(crate) async fn fetch_new_status_snapshot(
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
     // great idea.
-    let tree = "jobs[name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number]]";
+    let base_tree = "name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number]";
+    let tree = format!("jobs[{base_tree},jobs[{base_tree}]]");
     let overview_url = HOST.join(&format!("/job/llvm.org/view/All/api/json?tree={tree}"))?;
     let overview: JobContainer = json_get(client, overview_url).await?;
     for bot in overview.jobs {
@@ -316,14 +318,21 @@ pub(crate) async fn fetch_new_status_snapshot(
         let (display_name, job) = to_process[i].clone();
         i += 1;
 
-        if job.color.is_some() {
-            if let Some(bot) =
-                fetch_single_bot_status_snapshot(client, prev.get(&display_name), job).await?
-            {
-                result.insert(display_name, bot);
+        if job.color.is_some()
+            && let Some(bot) =
+                fetch_single_bot_status_snapshot(client, prev.get(&display_name), job.clone())
+                    .await?
+        {
+            result.insert(display_name.clone(), bot);
+        }
+
+        if let Some(nested) = job.jobs {
+            for sub_job in nested {
+                to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
             }
         } else if let Some(class) = &job.class
-            && class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
+            && (class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
+                || class == "com.cloudbees.hudson.plugins.folder.Folder")
         {
             let mut job_url = reqwest::Url::parse(&job.url)?;
             if job_url.host_str() == Some("ci.swift.org") {
@@ -341,12 +350,7 @@ pub(crate) async fn fetch_new_status_snapshot(
             tree_url.set_query(Some(&format!("tree={tree}")));
             let container: JobContainer = json_get(client, tree_url).await?;
             for sub_job in container.jobs {
-                // We only care about the main branch for these, usually.
-                // But some might have other important branches.
-                // Let's include everything that has a color.
-                if sub_job.color.is_some() {
-                    to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
-                }
+                to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
             }
         }
     }
