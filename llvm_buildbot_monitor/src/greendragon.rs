@@ -99,12 +99,23 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 struct RawJob {
     name: String,
     url: String,
     color: Option<Color>,
     #[serde(rename = "_class")]
     class: Option<String>,
+    last_completed_build: Option<BuildResultWithNumber>,
+    last_successful_build: Option<RawStatusBuild>,
+    last_unsuccessful_build: Option<RawStatusBuild>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct BuildResultWithNumber {
+    number: BuildNumber,
+    #[serde(flatten)]
+    data: BuildResult,
 }
 
 #[derive(Deserialize, Debug)]
@@ -112,7 +123,7 @@ struct JobContainer {
     jobs: Vec<RawJob>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct RawStatusBuild {
     number: BuildNumber,
 }
@@ -120,10 +131,20 @@ struct RawStatusBuild {
 async fn find_first_failing_build(
     client: &reqwest::Client,
     job_url: &reqwest::Url,
-    build_list: &[RawStatusBuild],
     last_successful: Option<BuildNumber>,
     last_failure: BuildNumber,
 ) -> Result<CompletedBuild> {
+    let mut api_url = job_url.clone();
+    api_url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid job URL"))?
+        .pop_if_empty()
+        .push("api")
+        .push("json");
+    let status: RawBotStatus = json_get(client, api_url).await?;
+    let mut build_list = status.builds;
+    build_list.sort_unstable_by_key(|x| x.number);
+
     debug_assert!(build_list.is_sorted_by(|x, y| x.number < y.number));
 
     let search_start: usize = if let Some(s) = last_successful {
@@ -191,38 +212,27 @@ async fn find_first_failing_build(
 #[serde(rename_all = "camelCase")]
 struct RawBotStatus {
     builds: Vec<RawStatusBuild>,
-    last_completed_build: Option<RawStatusBuild>,
-    last_successful_build: Option<RawStatusBuild>,
-    last_unsuccessful_build: Option<RawStatusBuild>,
 }
 
 async fn fetch_single_bot_status_snapshot(
     client: &reqwest::Client,
     prev: Option<&Bot>,
-    job_url: reqwest::Url,
-    color: Color,
+    job: RawJob,
 ) -> Result<Option<Bot>> {
-    let status: RawBotStatus = {
-        let mut api_url = job_url.clone();
-        api_url
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("invalid job URL"))?
-            .pop_if_empty()
-            .push("api")
-            .push("json");
-        let mut status: RawBotStatus = json_get(client, api_url).await?;
-        status.builds.sort_unstable_by_key(|x| x.number);
-        status
-    };
+    let mut job_url = reqwest::Url::parse(&job.url)?;
+    if job_url.host_str() == Some("ci.swift.org") {
+        job_url.set_host(Some("green.lab.llvm.org"))?;
+    }
 
-    let last_build_id = match status.last_completed_build {
-        Some(x) => x.number,
+    let last_build = match job.last_completed_build {
+        Some(x) => x,
         None => {
             // If nothing's been done yet, just pretend the bot DNE. Not much else we can do,
             // really.
             return Ok(None);
         }
     };
+    let last_build_id = last_build.number;
 
     let last_first_failing: Option<&CompletedBuild>;
     if let Some(prev_state) = prev {
@@ -235,8 +245,8 @@ async fn fetch_single_bot_status_snapshot(
     }
 
     let first_failing_build: Option<CompletedBuild> = match (
-        status.last_successful_build,
-        status.last_unsuccessful_build,
+        job.last_successful_build,
+        job.last_unsuccessful_build,
     ) {
         (None, None) => {
             warn!(
@@ -247,9 +257,7 @@ async fn fetch_single_bot_status_snapshot(
         (Some(_), None) => None,
         (None, Some(u)) => Some(match last_first_failing {
             Some(x) => x.clone(),
-            None => {
-                find_first_failing_build(client, &job_url, &status.builds, None, u.number).await?
-            }
+            None => find_first_failing_build(client, &job_url, None, u.number).await?,
         }),
 
         (Some(s), Some(u)) => {
@@ -257,14 +265,8 @@ async fn fetch_single_bot_status_snapshot(
                 match last_first_failing {
                     Some(x) => Some(x.clone()),
                     None => Some(
-                        find_first_failing_build(
-                            client,
-                            &job_url,
-                            &status.builds,
-                            Some(s.number),
-                            u.number,
-                        )
-                        .await?,
+                        find_first_failing_build(client, &job_url, Some(s.number), u.number)
+                            .await?,
                     ),
                 }
             } else {
@@ -273,7 +275,8 @@ async fn fetch_single_bot_status_snapshot(
         }
     };
 
-    let most_recent_build = fetch_completed_build(client, &job_url, last_build_id).await?;
+    let most_recent_build = process_build_result(last_build.number, last_build.data)?;
+
     Ok(Some(Bot {
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
         // categories, too?
@@ -282,9 +285,9 @@ async fn fetch_single_bot_status_snapshot(
         status: BotStatus {
             first_failing_build,
             most_recent_build,
-            is_online: match color {
-                Color::Disabled => false,
-                Color::Red { .. } | Color::Blue { .. } | Color::Yellow { .. } => true,
+            is_online: match job.color {
+                Some(Color::Disabled) | None => false,
+                Some(Color::Red { .. } | Color::Blue { .. } | Color::Yellow { .. }) => true,
             },
         },
     }))
@@ -301,7 +304,8 @@ pub(crate) async fn fetch_new_status_snapshot(
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
     // great idea.
-    let overview_url = HOST.join("/job/llvm.org/view/All/api/json")?;
+    let tree = "jobs[name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number]]";
+    let overview_url = HOST.join(&format!("/job/llvm.org/view/All/api/json?tree={tree}"))?;
     let overview: JobContainer = json_get(client, overview_url).await?;
     for bot in overview.jobs {
         to_process.push((bot.name.clone(), bot));
@@ -312,21 +316,19 @@ pub(crate) async fn fetch_new_status_snapshot(
         let (display_name, job) = to_process[i].clone();
         i += 1;
 
-        let mut job_url = reqwest::Url::parse(&job.url)?;
-        if job_url.host_str() == Some("ci.swift.org") {
-            job_url.set_host(Some("green.lab.llvm.org"))?;
-        }
-
-        if let Some(color) = job.color {
+        if job.color.is_some() {
             if let Some(bot) =
-                fetch_single_bot_status_snapshot(client, prev.get(&display_name), job_url, color)
-                    .await?
+                fetch_single_bot_status_snapshot(client, prev.get(&display_name), job).await?
             {
                 result.insert(display_name, bot);
             }
         } else if let Some(class) = &job.class
             && class == "org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"
         {
+            let mut job_url = reqwest::Url::parse(&job.url)?;
+            if job_url.host_str() == Some("ci.swift.org") {
+                job_url.set_host(Some("green.lab.llvm.org"))?;
+            }
             let mut api_url = job_url.clone();
             api_url
                 .path_segments_mut()
@@ -334,7 +336,10 @@ pub(crate) async fn fetch_new_status_snapshot(
                 .pop_if_empty()
                 .push("api")
                 .push("json");
-            let container: JobContainer = json_get(client, api_url).await?;
+
+            let mut tree_url = api_url.clone();
+            tree_url.set_query(Some(&format!("tree={tree}")));
+            let container: JobContainer = json_get(client, tree_url).await?;
             for sub_job in container.jobs {
                 // We only care about the main branch for these, usually.
                 // But some might have other important branches.
@@ -406,19 +411,19 @@ impl RawBuildbotTime {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChangeSet {
     author_email: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ChangeSetListing {
     items: Vec<ChangeSet>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct BuildResult {
     timestamp: RawBuildbotTime,
@@ -431,21 +436,7 @@ struct BuildResult {
     change_sets: Vec<ChangeSetListing>,
 }
 
-async fn fetch_completed_build(
-    client: &reqwest::Client,
-    job_url: &reqwest::Url,
-    id: BuildNumber,
-) -> Result<CompletedBuild> {
-    let mut api_url = job_url.clone();
-    api_url
-        .path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("invalid job URL"))?
-        .pop_if_empty()
-        .push(&id.to_string())
-        .push("api")
-        .push("json");
-    let data: BuildResult = json_get(client, api_url).await?;
-
+fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<CompletedBuild> {
     let mut blamelist = Vec::new();
     let all_change_sets = if let Some(x) = data.change_set {
         vec![x]
@@ -473,4 +464,21 @@ async fn fetch_completed_build(
         completion_time: data.timestamp.as_datetime()?,
         blamelist: blamelist.into(),
     })
+}
+
+async fn fetch_completed_build(
+    client: &reqwest::Client,
+    job_url: &reqwest::Url,
+    id: BuildNumber,
+) -> Result<CompletedBuild> {
+    let mut api_url = job_url.clone();
+    api_url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid job URL"))?
+        .pop_if_empty()
+        .push(&id.to_string())
+        .push("api")
+        .push("json");
+    let data: BuildResult = json_get(client, api_url).await?;
+    process_build_result(id, data)
 }
