@@ -123,6 +123,16 @@ fn is_successful_status(s: BuildbotResult) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn is_successful_status_maps_results_correctly() {
+    assert_eq!(is_successful_status(BuildbotResult::Success), Some(true));
+    assert_eq!(is_successful_status(BuildbotResult::Warnings), Some(true));
+    assert_eq!(is_successful_status(BuildbotResult::Failure), Some(false));
+    assert_eq!(is_successful_status(BuildbotResult::Exception), Some(false));
+    assert_eq!(is_successful_status(BuildbotResult::Skipped), None);
+}
+
 #[derive(Debug, Deserialize)]
 struct BuilderInfo {
     #[serde(rename = "builderid")]
