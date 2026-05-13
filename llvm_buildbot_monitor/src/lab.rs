@@ -6,6 +6,7 @@ use crate::CompletedBuild;
 use crate::Email;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -114,8 +115,22 @@ where
     }
 }
 
-fn is_successful_status(s: BuildbotResult) -> bool {
-    s == BuildbotResult::Success || s == BuildbotResult::Warnings
+fn is_successful_status(s: BuildbotResult) -> Option<bool> {
+    match s {
+        BuildbotResult::Success | BuildbotResult::Warnings => Some(true),
+        BuildbotResult::Skipped => None,
+        BuildbotResult::Failure | BuildbotResult::Exception => Some(false),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn is_successful_status_maps_results_correctly() {
+    assert_eq!(is_successful_status(BuildbotResult::Success), Some(true));
+    assert_eq!(is_successful_status(BuildbotResult::Warnings), Some(true));
+    assert_eq!(is_successful_status(BuildbotResult::Failure), Some(false));
+    assert_eq!(is_successful_status(BuildbotResult::Exception), Some(false));
+    assert_eq!(is_successful_status(BuildbotResult::Skipped), None);
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,20 +330,19 @@ struct UnabridgedLabBuildListing {
     builds: Vec<UnabridgedLabBuild>,
 }
 
-async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
+async fn for_each_build<T: std::borrow::Borrow<reqwest::Client>, F>(
     client: T,
     builder_id: BotID,
-) -> Result<Option<BuilderBuildInfo>> {
-    debug!("Fetching builder info for {builder_id}");
-
+    mut f: F,
+) -> Result<()>
+where
+    F: FnMut(UnabridgedLabBuild) -> ControlFlow<()>,
+{
     let fetch_amount = 25;
-    // If we have to go more than this many builds back, really, we're done.
     let max_fetch = 500usize;
-    let mut best_result: Option<(CompletedLabBuild, CompletedLabBuild)> = None;
-
-    let fetch_amount_str = fetch_amount.to_string();
-    let mut pending_builds = Vec::new();
     let mut query_url = HOST.join(&format!("builders/{builder_id}/builds"))?;
+    let fetch_amount_str = fetch_amount.to_string();
+
     for start in (0..max_fetch).step_by(fetch_amount) {
         query_url
             .query_pairs_mut()
@@ -340,7 +354,9 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
         let results = json_get_api::<UnabridgedLabBuildListing>(client.borrow(), &query_url)
             .await?
             .builds;
-        if results.is_empty() {
+
+        let num_results = results.len();
+        if num_results == 0 {
             break;
         }
 
@@ -348,74 +364,56 @@ async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
         // fields are set. We only examine UnabridgedLabBuilds that have those set. If, by
         // happenstance, one or more builds get added during our search, that's OK: we'll just
         // rescan old ones and re-discard them as we've done previously.
-        let host_returned_fewer_builds_than_requested = results.len() < fetch_amount;
-        let completed_results: Vec<_> = results
+        if results
             .into_iter()
-            .filter_map(|x| {
-                if let Some(c) = x.to_completed_build() {
-                    Some(c)
-                } else {
-                    pending_builds.push(x.build_id);
-                    None
-                }
-            })
-            .collect();
-
-        let newest_success = completed_results
-            .iter()
-            .enumerate()
-            .find(|(_, x)| is_successful_status(x.result));
-        match newest_success {
-            Some((i, _)) => match best_result {
-                None => {
-                    if i == 0 {
-                        return Ok(Some(BuilderBuildInfo {
-                            most_recent_build: completed_results[0].clone(),
-                            first_failing_build: None,
-                            pending_builds,
-                        }));
-                    }
-                    return Ok(Some(BuilderBuildInfo {
-                        most_recent_build: completed_results[0].clone(),
-                        first_failing_build: Some(completed_results[i - 1].clone()),
-                        pending_builds,
-                    }));
-                }
-                Some((first_failing_build, most_recent_build)) => {
-                    return Ok(Some(BuilderBuildInfo {
-                        most_recent_build,
-                        first_failing_build: Some(
-                            completed_results
-                                .get(i - 1)
-                                .unwrap_or(&first_failing_build)
-                                .clone(),
-                        ),
-                        pending_builds,
-                    }));
-                }
-            },
-            None if completed_results.is_empty() => (),
-            None => {
-                let most_recent_build = completed_results.first().unwrap().clone();
-                let first_failing_build = completed_results.last().unwrap().clone();
-                best_result = Some((first_failing_build, most_recent_build));
-            }
+            .any(|unabridged| f(unabridged).is_break())
+        {
+            break;
         }
 
-        // If we got fewer builds than we requested, we're out.
-        if host_returned_fewer_builds_than_requested {
+        if num_results < fetch_amount {
             break;
         }
     }
+    Ok(())
+}
 
-    match best_result {
-        Some((first_failing_build, most_recent_build)) => Ok(Some(BuilderBuildInfo {
-            most_recent_build,
-            first_failing_build: Some(first_failing_build),
-            pending_builds,
-        })),
-        None => Ok(None),
-    }
+async fn fetch_builder_build_info<T: std::borrow::Borrow<reqwest::Client>>(
+    client: T,
+    builder_id: BotID,
+) -> Result<Option<BuilderBuildInfo>> {
+    debug!("Fetching builder info for {builder_id}");
+
+    let mut most_recent_build = None;
+    let mut last_known_failure = None;
+    let mut pending_builds = Vec::new();
+
+    for_each_build(client.borrow(), builder_id, |unabridged| {
+        let Some(completed) = unabridged.to_completed_build() else {
+            pending_builds.push(unabridged.build_id);
+            return ControlFlow::Continue(());
+        };
+
+        if most_recent_build.is_none() {
+            most_recent_build = Some(completed.clone());
+        }
+
+        match is_successful_status(completed.result) {
+            Some(true) => ControlFlow::Break(()),
+            Some(false) => {
+                last_known_failure = Some(completed);
+                ControlFlow::Continue(())
+            }
+            None => ControlFlow::Continue(()),
+        }
+    })
+    .await?;
+
+    Ok(most_recent_build.map(|most_recent_build| BuilderBuildInfo {
+        most_recent_build,
+        first_failing_build: last_known_failure,
+        pending_builds,
+    }))
 }
 
 async fn concurrent_map_early_exit<
@@ -944,12 +942,16 @@ async fn perform_incremental_builder_sync(
                     Bot {
                         category: bot.category.clone(),
                         status: BotStatus {
-                            first_failing_build: if is_successful_status(build.status) {
-                                None
-                            } else if let Some(x) = bot.status.first_failing_build.as_ref() {
-                                Some(x.clone())
-                            } else {
-                                Some(build.clone())
+                            first_failing_build: match is_successful_status(build.status) {
+                                Some(true) => None,
+                                Some(false) => {
+                                    if let Some(f) = &bot.status.first_failing_build {
+                                        Some(f.clone())
+                                    } else {
+                                        Some(build.clone())
+                                    }
+                                }
+                                None => bot.status.first_failing_build.clone(),
                             },
                             most_recent_build: build,
                             is_online: true,
