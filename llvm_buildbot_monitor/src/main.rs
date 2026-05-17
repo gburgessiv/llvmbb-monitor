@@ -76,13 +76,48 @@ struct CompletedBuild {
     blamelist: Box<[Email]>,
 }
 
+#[derive(Clone, Debug)]
+enum FirstFailingBuild {
+    /// We know exactly which build failed.
+    Known(CompletedBuild),
+    /// We know it failed somewhere between a success and the oldest retained failure.
+    Extrapolated {
+        /// The ID of the first build that *might* have failed (typically last_success + 1).
+        id: BuildNumber,
+        /// The time of the last successful build.
+        last_success_time: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl FirstFailingBuild {
+    fn id(&self) -> BuildNumber {
+        match self {
+            FirstFailingBuild::Known(x) => x.id,
+            FirstFailingBuild::Extrapolated { id, .. } => *id,
+        }
+    }
+
+    fn completion_time(&self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            FirstFailingBuild::Known(x) => x.completion_time,
+            FirstFailingBuild::Extrapolated {
+                last_success_time, ..
+            } => *last_success_time,
+        }
+    }
+
+    fn is_extrapolated(&self) -> bool {
+        matches!(self, FirstFailingBuild::Extrapolated { .. })
+    }
+}
+
 // FIXME: Adding a 'certain' field and surfacing that in discord may be nice? If a bot history goes
 // back up to 7 weeks, we're doomed to always report 7wks + $(uptiem) of brokenness for the bot.
 // Would be nice to put a '>' there.
 #[derive(Clone, Debug)]
 struct BotStatus {
     // If the most_recent_build is red, this'll be the first build we know of that failed.
-    first_failing_build: Option<CompletedBuild>,
+    first_failing_build: Option<FirstFailingBuild>,
     most_recent_build: CompletedBuild,
     is_online: bool,
 }
