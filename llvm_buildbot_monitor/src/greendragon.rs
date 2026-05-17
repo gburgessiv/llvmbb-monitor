@@ -4,6 +4,7 @@ use crate::BuildNumber;
 use crate::BuildbotResult;
 use crate::CompletedBuild;
 use crate::Email;
+use crate::FirstFailingBuild;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -11,7 +12,7 @@ use std::result;
 
 use anyhow::{Context, Result, bail};
 use lazy_static::lazy_static;
-use log::{error, info, warn};
+use log::{info, warn};
 use serde::Deserialize;
 
 lazy_static! {
@@ -109,6 +110,7 @@ struct RawJob {
     last_completed_build: Option<BuildResultWithNumber>,
     last_successful_build: Option<RawStatusBuild>,
     last_unsuccessful_build: Option<RawStatusBuild>,
+    first_build: Option<RawStatusBuild>,
     jobs: Option<Vec<RawJob>>,
 }
 
@@ -133,69 +135,67 @@ async fn find_first_failing_build(
     client: &reqwest::Client,
     job_url: &reqwest::Url,
     last_successful: Option<BuildNumber>,
-    last_failure: BuildNumber,
-) -> Result<CompletedBuild> {
-    let mut api_url = job_url.clone();
-    api_url
-        .path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("invalid job URL"))?
-        .pop_if_empty()
-        .push("api")
-        .push("json");
-    let status: RawBotStatus = json_get(client, api_url).await?;
-    let mut build_list = status.builds;
-    build_list.sort_unstable_by_key(|x| x.number);
+    first_build: Option<BuildNumber>,
+) -> Result<FirstFailingBuild> {
+    // We want the first *failure*.
+    // If we have a last success, we start there and immediately jump to its 'nextBuild'.
+    // If we don't have a last success, we start at the first known build.
+    let (mut curr_id, mut last_success_time) = match last_successful {
+        Some(s) => {
+            let (raw, completed) = fetch_build_data(client, job_url, s).await?;
+            let next = raw.next_build.map(|x| x.number).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "last successful build {s} has no next build, but the bot is failing?"
+                )
+            })?;
 
-    debug_assert!(build_list.is_sorted_by(|x, y| x.number < y.number));
+            let success_time = completed
+                .map(|x| x.completion_time)
+                .unwrap_or(raw.timestamp.as_datetime()?);
 
-    let search_start: usize = if let Some(s) = last_successful {
-        assert!(last_failure > s, "{last_failure} should be > {s}");
-        match build_list.binary_search_by_key(&s, |x| x.number) {
-            Ok(n) => n + 1,
-            Err(n) => n,
+            if next != s + 1 {
+                return Ok(FirstFailingBuild::Extrapolated {
+                    id: s + 1,
+                    last_success_time: success_time,
+                });
+            }
+
+            (next, Some(success_time))
         }
-    } else {
-        0
+        None => (
+            first_build.ok_or_else(|| anyhow::anyhow!("no builds at all for {job_url}"))?,
+            None,
+        ),
     };
 
-    for build_number in build_list[search_start..].iter().map(|x| x.number) {
-        match fetch_completed_build(client, job_url, build_number).await {
-            Err(x) => {
-                let root_cause = x.root_cause();
-                if let Some(x) = root_cause.downcast_ref::<reqwest::Error>()
-                    && x.status() == Some(reqwest::StatusCode::NOT_FOUND)
-                {
-                    info!(
-                        "Finding first failing build for {job_url:?} 404'ed on {build_number}; trying another..."
-                    );
-                    continue;
-                }
-                return Err(x);
-            }
-            Ok(x) => {
-                if x.status != BuildbotResult::Success {
-                    return Ok(x);
-                }
-                error!(
-                    concat!(
-                        "Lies? Build {:?}/{} is reported successful, when it should've ",
-                        "failed. Most recent successful == {:?}.",
-                    ),
-                    job_url, build_number, last_successful
-                );
-            }
+    loop {
+        let (raw, completed) = fetch_build_data(client, job_url, curr_id).await?;
+        info!(
+            "Checking build {curr_id} for {job_url}: result {:?}",
+            raw.result
+        );
+        if let Some(ref x) = completed
+            && x.status != BuildbotResult::Success
+        {
+            info!("Found first failing build for {job_url}: {curr_id}");
+            return Ok(FirstFailingBuild::Known(completed.unwrap()));
         }
-    }
 
-    let candidates: Vec<BuildNumber> = build_list.iter().map(|x| x.number).collect();
-    // This is possible if either build_list is empty, or if we raced and somehow jenkins dropped N
-    // builds on the floor. So mostly just that first part.
-    bail!(
-        "no available builds > {:?} for {:?} (candidates: {:?})",
-        last_successful,
-        job_url,
-        candidates
-    );
+        let next = raw.next_build.map(|x| x.number).ok_or_else(|| {
+            anyhow::anyhow!("reached end of history for {job_url} without finding a failure?")
+        })?;
+
+        if next != curr_id + 1 {
+            // This is unlikely for successes, but if we just finished a success and the next build
+            // is far away, we have a gap.
+            return Ok(FirstFailingBuild::Extrapolated {
+                id: curr_id + 1,
+                last_success_time: last_success_time.unwrap_or(raw.timestamp.as_datetime()?),
+            });
+        }
+        curr_id = next;
+        last_success_time = completed.map(|x| x.completion_time);
+    }
 }
 
 // It's sorta interesting that the JSON has a few fields here. We have all of:
@@ -209,11 +209,6 @@ async fn find_first_failing_build(
 // thing I saw, despite builds failing before, so I'm leaving that alone. So that just leaves
 // unsuccessful vs failed. Since the only remaining "good" tag is lastSuccessfulBuild, let's go
 // with successful/unsuccessful.
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct RawBotStatus {
-    builds: Vec<RawStatusBuild>,
-}
 
 async fn fetch_single_bot_status_snapshot(
     client: &reqwest::Client,
@@ -232,7 +227,7 @@ async fn fetch_single_bot_status_snapshot(
     };
     let last_build_id = last_build.number;
 
-    let last_first_failing: Option<&CompletedBuild>;
+    let last_first_failing: Option<&FirstFailingBuild>;
     if let Some(prev_state) = prev {
         if prev_state.status.most_recent_build.id == last_build_id {
             return Ok(Some(prev_state.clone()));
@@ -242,7 +237,7 @@ async fn fetch_single_bot_status_snapshot(
         last_first_failing = None;
     }
 
-    let first_failing_build: Option<CompletedBuild> = match (
+    let first_failing_build: Option<FirstFailingBuild> = match (
         job.last_successful_build,
         job.last_unsuccessful_build,
     ) {
@@ -253,18 +248,20 @@ async fn fetch_single_bot_status_snapshot(
             return Ok(None);
         }
         (Some(_), None) => None,
-        (None, Some(u)) => Some(match last_first_failing {
-            Some(x) => x.clone(),
-            None => find_first_failing_build(client, &job_url, None, u.number).await?,
-        }),
+        (None, Some(_)) => match last_first_failing {
+            Some(x) => Some(x.clone()),
+            None => Some(
+                find_first_failing_build(client, &job_url, None, job.first_build.map(|x| x.number))
+                    .await?,
+            ),
+        },
 
         (Some(s), Some(u)) => {
             if u.number > s.number {
                 match last_first_failing {
                     Some(x) => Some(x.clone()),
                     None => Some(
-                        find_first_failing_build(client, &job_url, Some(s.number), u.number)
-                            .await?,
+                        find_first_failing_build(client, &job_url, Some(s.number), None).await?,
                     ),
                 }
             } else {
@@ -273,7 +270,8 @@ async fn fetch_single_bot_status_snapshot(
         }
     };
 
-    let most_recent_build = process_build_result(last_build.number, last_build.data)?;
+    let most_recent_build = process_build_result(last_build.number, last_build.data)?
+        .context("last completed build should have a result")?;
 
     Ok(Some(Bot {
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
@@ -302,13 +300,14 @@ pub(crate) async fn fetch_new_status_snapshot(
     // "All build groups" is necessary, since greendragon also includes a lot of miscellaneous
     // Apple-specific jobs (e.g., checking mac mini health/etc). Surfacing that probably isn't a
     // great idea.
-    let base_tree = "name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number]";
+    let base_tree = "name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number],firstBuild[number]";
     let tree = format!("jobs[{base_tree},jobs[{base_tree}]]");
     let overview_url = HOST.join(&format!("/job/llvm.org/view/All/api/json?tree={tree}"))?;
     let overview: JobContainer = json_get(client, overview_url).await?;
     for bot in overview.jobs {
         to_process.push((bot.name.clone(), bot));
     }
+    info!("GreenDragon: {} bots to process...", to_process.len());
 
     let mut i = 0;
     while i < to_process.len() {
@@ -349,6 +348,7 @@ pub(crate) async fn fetch_new_status_snapshot(
         }
     }
 
+    info!("GreenDragon: done processing bots!");
     Ok(result)
 }
 
@@ -425,7 +425,8 @@ struct ChangeSetListing {
 #[serde(rename_all = "camelCase")]
 struct BuildResult {
     timestamp: RawBuildbotTime,
-    result: RawBuildResult,
+    result: Option<RawBuildResult>,
+    next_build: Option<RawStatusBuild>,
 
     // A single BuildResult can have either `changeSet` or `changeSets`. Both have different types.
     #[serde(default)]
@@ -434,7 +435,11 @@ struct BuildResult {
     change_sets: Vec<ChangeSetListing>,
 }
 
-fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<CompletedBuild> {
+fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<Option<CompletedBuild>> {
+    let result = match data.result {
+        Some(x) => x,
+        None => return Ok(None),
+    };
     let mut blamelist = Vec::new();
     let all_change_sets = if let Some(x) = data.change_set {
         vec![x]
@@ -450,9 +455,9 @@ fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<CompletedB
         }
     }
 
-    Ok(CompletedBuild {
+    Ok(Some(CompletedBuild {
         id,
-        status: match data.result {
+        status: match result {
             RawBuildResult::Aborted => BuildbotResult::Exception,
             RawBuildResult::Success => BuildbotResult::Success,
             // I'm not... entirely sure what 'unstable' means. Looks like it's just "test
@@ -461,14 +466,14 @@ fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<CompletedB
         },
         completion_time: data.timestamp.as_datetime()?,
         blamelist: blamelist.into(),
-    })
+    }))
 }
 
-async fn fetch_completed_build(
+async fn fetch_build_data(
     client: &reqwest::Client,
     job_url: &reqwest::Url,
     id: BuildNumber,
-) -> Result<CompletedBuild> {
+) -> Result<(BuildResult, Option<CompletedBuild>)> {
     let mut api_url = job_url.clone();
     api_url
         .path_segments_mut()
@@ -478,5 +483,6 @@ async fn fetch_completed_build(
         .push("api")
         .push("json");
     let data: BuildResult = json_get(client, api_url).await?;
-    process_build_result(id, data)
+    let completed = process_build_result(id, data.clone())?;
+    Ok((data, completed))
 }

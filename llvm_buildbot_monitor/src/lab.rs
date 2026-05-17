@@ -4,6 +4,7 @@ use crate::BuildNumber;
 use crate::BuildbotResult;
 use crate::CompletedBuild;
 use crate::Email;
+use crate::FirstFailingBuild;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -338,7 +339,7 @@ async fn for_each_build<T: std::borrow::Borrow<reqwest::Client>, F>(
 where
     F: FnMut(UnabridgedLabBuild) -> ControlFlow<()>,
 {
-    let fetch_amount = 25;
+    let fetch_amount = 10;
     let max_fetch = 500usize;
     let mut query_url = HOST.join(&format!("builders/{builder_id}/builds"))?;
     let fetch_amount_str = fetch_amount.to_string();
@@ -628,7 +629,9 @@ async fn resolve_builder_build_info(
     let most_recent_build = resolve_completed_lab_build(client, &info.most_recent_build).await?;
     let first_failing_build = match &info.first_failing_build {
         None => None,
-        Some(x) => Some(resolve_completed_lab_build(client, x).await?),
+        Some(x) => Some(FirstFailingBuild::Known(
+            resolve_completed_lab_build(client, x).await?,
+        )),
     };
     Ok(Bot {
         category: determine_bot_category(bot_info)
@@ -657,6 +660,7 @@ async fn perform_initial_builder_sync(
             builder_infos.iter().map(|x| x.id),
             move |builder_id: BotID| {
                 let client = client.clone();
+                info!("Fetching builder build info for {builder_id}...");
                 async move {
                     fetch_builder_build_info(client, builder_id)
                         .await
@@ -949,7 +953,7 @@ async fn perform_incremental_builder_sync(
                                     if let Some(f) = &bot.status.first_failing_build {
                                         Some(f.clone())
                                     } else {
-                                        Some(build.clone())
+                                        Some(FirstFailingBuild::Known(build.clone()))
                                     }
                                 }
                                 None => bot.status.first_failing_build.clone(),

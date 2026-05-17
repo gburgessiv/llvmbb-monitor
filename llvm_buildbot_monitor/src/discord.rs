@@ -1,6 +1,6 @@
 // TODO: spawn_blocking the storage locks.
 use crate::storage::Storage;
-use crate::{Bot, BotID, BotStatusSnapshot, CompletedBuild, Email};
+use crate::{Bot, BotID, BotStatusSnapshot, Email, FirstFailingBuild};
 
 use std::borrow::{Borrow, Cow};
 use std::cell::LazyCell;
@@ -741,7 +741,8 @@ impl ChannelServer {
                 BotID::GreenDragon { .. } => write!(
                     current_message,
                     "{}{}/",
-                    next_breakage.bot_url, next_breakage.build.id
+                    next_breakage.bot_url,
+                    next_breakage.build.id()
                 ),
                 BotID::Lab { .. } => {
                     // As much as I'd prefer to use `name` instead of `id` here, buildbot doesn't
@@ -750,31 +751,39 @@ impl ChannelServer {
                     write!(
                         current_message,
                         "{}/builds/{}",
-                        next_breakage.bot_url, next_breakage.build.id
+                        next_breakage.bot_url,
+                        next_breakage.build.id()
                     )
                 }
             }
             .unwrap();
 
             current_message.push('>');
-            if next_breakage.build.blamelist.len() > 25 {
-                // Some bots have very slow turnarounds. Spraying `updates` with massive blamelists
-                // probably hurts more than it helps.
-                write!(
-                    current_message,
-                    " (blamelist: {} contributors)",
-                    next_breakage.build.blamelist.len()
-                )
-                .unwrap();
-            } else {
-                blamelist_cache
-                    .append_blamelist(
-                        &mut current_message,
-                        http,
-                        &next_breakage.build.blamelist,
-                        &self.storage,
-                    )
-                    .await?;
+            match &next_breakage.build {
+                FirstFailingBuild::Known(x) => {
+                    if x.blamelist.len() > 25 {
+                        // Some bots have very slow turnarounds. Spraying `updates` with massive blamelists
+                        // probably hurts more than it helps.
+                        write!(
+                            current_message,
+                            " (blamelist: {} contributors)",
+                            x.blamelist.len()
+                        )
+                        .unwrap();
+                    } else {
+                        blamelist_cache
+                            .append_blamelist(
+                                &mut current_message,
+                                http,
+                                &x.blamelist,
+                                &self.storage,
+                            )
+                            .await?;
+                    }
+                }
+                FirstFailingBuild::Extrapolated { .. } => {
+                    write!(current_message, " (gap in history; unknown contributors)").unwrap();
+                }
             }
 
             for msg in split_message(current_message, DISCORD_MESSAGE_SIZE_LIMIT) {
@@ -1462,7 +1471,7 @@ impl StatusUIUpdater {
                             .first_failing_build
                             .as_ref()
                             .unwrap()
-                            .completion_time;
+                            .completion_time();
                     is_duration_recentish(now - broken_at)
                 })
                 .count();
@@ -1540,7 +1549,7 @@ impl StatusUIUpdater {
                     bot.status
                         .first_failing_build
                         .as_ref()
-                        .map(|x| (*name, x.id, x.completion_time, bot))
+                        .map(|x| (*name, x.id(), x.completion_time(), bot, x.is_extrapolated()))
                 })
                 .collect();
 
@@ -1548,13 +1557,13 @@ impl StatusUIUpdater {
                 continue;
             }
 
-            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _, _)| bot_name));
-            failed_bots.sort_by_key(|&(_, _, first_failed_time, _)| first_failed_time);
+            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _, _, _)| bot_name));
+            failed_bots.sort_by_key(|&(_, _, first_failed_time, _, _)| first_failed_time);
             failed_bots.reverse();
 
             this_message.clear();
             write!(this_message, "**Broken for `{category_name}`**:").unwrap();
-            for (bot_id, first_failed_id, first_failed_time, bot) in failed_bots {
+            for (bot_id, first_failed_id, first_failed_time, bot, is_extrapolated) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
                         "Apparently {bot_id:?} failed in the future (current time = {start_time})"
@@ -1575,10 +1584,11 @@ impl StatusUIUpdater {
 
                 let url: &str = bot.url.as_str();
 
+                let prefix = if is_extrapolated { ">" } else { "" };
                 write!(
                     this_message,
-                    "\n\\-{} For {}: <{}> (since #{})",
-                    emoji, time_broken_str, url, first_failed_id,
+                    "\n\\-{} For {}{}: <{}> (since #{})",
+                    emoji, prefix, time_broken_str, url, first_failed_id,
                 )
                 .unwrap();
             }
@@ -1628,7 +1638,7 @@ struct UpdateUIUpdater {
 struct BotBuild {
     bot_id: BotID,
     bot_url: String,
-    build: CompletedBuild,
+    build: FirstFailingBuild,
 }
 
 impl UpdateUIUpdater {
