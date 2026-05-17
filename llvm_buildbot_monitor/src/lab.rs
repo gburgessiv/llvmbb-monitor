@@ -634,6 +634,7 @@ async fn resolve_builder_build_info(
         category: determine_bot_category(bot_info)
             .unwrap_or(&bot_info.name)
             .to_string(),
+        url: format!("http://lab.llvm.org/buildbot/#/builders/{}", bot_info.id),
         status: BotStatus {
             first_failing_build,
             most_recent_build,
@@ -956,6 +957,7 @@ async fn perform_incremental_builder_sync(
                             most_recent_build: build,
                             is_online: true,
                         },
+                        url: bot.url.clone(),
                     },
                 )
             }

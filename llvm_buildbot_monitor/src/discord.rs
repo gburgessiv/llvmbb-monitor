@@ -652,15 +652,6 @@ impl GuildMemberCache {
     }
 }
 
-fn url_escape_bot_name(bot_name: &str) -> Cow<'_, str> {
-    // This is the only case I have to care about at the moment.
-    if !bot_name.contains(' ') {
-        Cow::Borrowed(bot_name)
-    } else {
-        Cow::Owned(bot_name.replace(' ', "%20"))
-    }
-}
-
 // Hack: keep a minimum of `MESSAGE_CACHE_SIZE` around for splitting. Otherwise, we might end up
 // writing a new message a while after we start. This is problematic, because it'll show up with
 // the bot name/etc, and won't look sufficiently similar to a newline. It may also scroll the
@@ -747,20 +738,19 @@ impl ChannelServer {
             )
             .unwrap();
             match &next_breakage.bot_id {
-                BotID::GreenDragon { name } => write!(
+                BotID::GreenDragon { .. } => write!(
                     current_message,
-                    "http://green.lab.llvm.org/green/job/{}/{}/",
-                    url_escape_bot_name(name),
-                    next_breakage.build.id
+                    "{}{}/",
+                    next_breakage.bot_url, next_breakage.build.id
                 ),
-                BotID::Lab { id, .. } => {
+                BotID::Lab { .. } => {
                     // As much as I'd prefer to use `name` instead of `id` here, buildbot doesn't
                     // properly render `/#/builders/${bot_name}/builds/${build_id}`, so `${bot_id}`
                     // it is...
                     write!(
                         current_message,
-                        "http://lab.llvm.org/buildbot/#/builders/{}/builds/{}",
-                        id, next_breakage.build.id
+                        "{}/builds/{}",
+                        next_breakage.bot_url, next_breakage.build.id
                     )
                 }
             }
@@ -1550,7 +1540,7 @@ impl StatusUIUpdater {
                     bot.status
                         .first_failing_build
                         .as_ref()
-                        .map(|x| (*name, x.id, x.completion_time))
+                        .map(|x| (*name, x.id, x.completion_time, bot))
                 })
                 .collect();
 
@@ -1558,13 +1548,13 @@ impl StatusUIUpdater {
                 continue;
             }
 
-            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _)| bot_name));
-            failed_bots.sort_by_key(|&(_, _, first_failed_time)| first_failed_time);
+            all_failed_bots.extend(failed_bots.iter().map(|&(bot_name, _, _, _)| bot_name));
+            failed_bots.sort_by_key(|&(_, _, first_failed_time, _)| first_failed_time);
             failed_bots.reverse();
 
             this_message.clear();
             write!(this_message, "**Broken for `{category_name}`**:").unwrap();
-            for (bot_id, first_failed_id, first_failed_time) in failed_bots {
+            for (bot_id, first_failed_id, first_failed_time, bot) in failed_bots {
                 let (time_broken, time_broken_str) = if start_time < first_failed_time {
                     warn!(
                         "Apparently {bot_id:?} failed in the future (current time = {start_time})"
@@ -1583,19 +1573,12 @@ impl StatusUIUpdater {
                     ""
                 };
 
-                let (url_prefix, bot_name): (&str, &str) = match &bot_id {
-                    BotID::GreenDragon { name } => ("http://green.lab.llvm.org/green/job", name),
-                    BotID::Lab { name, .. } => ("http://lab.llvm.org/buildbot/#/builders", name),
-                };
+                let url: &str = bot.url.as_str();
 
                 write!(
                     this_message,
-                    "\n\\-{} For {}: <{}/{}> (since #{})",
-                    emoji,
-                    time_broken_str,
-                    url_prefix,
-                    url_escape_bot_name(bot_name),
-                    first_failed_id,
+                    "\n\\-{} For {}: <{}> (since #{})",
+                    emoji, time_broken_str, url, first_failed_id,
                 )
                 .unwrap();
             }
@@ -1644,25 +1627,27 @@ struct UpdateUIUpdater {
 
 struct BotBuild {
     bot_id: BotID,
+    bot_url: String,
     build: CompletedBuild,
 }
 
 impl UpdateUIUpdater {
     fn get_updates(&mut self, snapshot: &BotStatusSnapshot) -> Vec<Arc<BotBuild>> {
-        let now_broken: Vec<(&BotID, &CompletedBuild)> = snapshot
+        let now_broken: Vec<(&BotID, &Bot)> = snapshot
             .bots
             .iter()
-            .filter_map(|(id, bot)| bot.status.first_failing_build.as_ref().map(|x| (id, x)))
+            .filter(|(_, bot)| bot.status.first_failing_build.is_some())
             .collect();
 
         let newly_broken = if let Some(previously_broken) = &self.previously_broken_bots {
             now_broken
                 .iter()
-                .filter(|(name, _)| !previously_broken.contains(*name))
-                .map(|(name, build)| {
+                .filter(|(id, _)| !previously_broken.contains(*id))
+                .map(|(id, bot)| {
                     Arc::new(BotBuild {
-                        bot_id: (*name).to_owned(),
-                        build: (*build).to_owned(),
+                        bot_id: (*id).to_owned(),
+                        bot_url: bot.url.clone(),
+                        build: bot.status.first_failing_build.as_ref().unwrap().clone(),
                     })
                 })
                 .collect()
