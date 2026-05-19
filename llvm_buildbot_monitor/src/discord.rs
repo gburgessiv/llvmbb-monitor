@@ -1584,7 +1584,19 @@ impl StatusUIUpdater {
 
                 let url: &str = bot.url.as_str();
 
-                let prefix = if is_extrapolated { ">" } else { "" };
+                let prefix = if is_extrapolated {
+                    if time_broken < chrono::Duration::days(3) {
+                        if time_broken < chrono::Duration::days(1) {
+                            ">"
+                        } else {
+                            "~"
+                        }
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                };
                 write!(
                     this_message,
                     "\n\\-{} For {}{}: <{}> (since #{})",
