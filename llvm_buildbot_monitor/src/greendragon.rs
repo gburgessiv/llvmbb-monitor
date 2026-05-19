@@ -455,6 +455,9 @@ fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<Option<Com
         }
     }
 
+    blamelist.sort_unstable();
+    blamelist.dedup();
+
     Ok(Some(CompletedBuild {
         id,
         status: match result {
@@ -485,4 +488,43 @@ async fn fetch_build_data(
     let data: BuildResult = json_get(client, api_url).await?;
     let completed = process_build_result(id, data.clone())?;
     Ok((data, completed))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_process_build_result_dedupes_blamelist() {
+        let data = BuildResult {
+            timestamp: RawBuildbotTime(1600000000000.0),
+            result: Some(RawBuildResult::Success),
+            next_build: None,
+            change_set: Some(ChangeSetListing {
+                items: vec![
+                    ChangeSet {
+                        author_email: "b@example.com".to_string(),
+                    },
+                    ChangeSet {
+                        author_email: "a@example.com".to_string(),
+                    },
+                    ChangeSet {
+                        author_email: "b@example.com".to_string(),
+                    },
+                ],
+            }),
+            change_sets: vec![],
+        };
+
+        let result = process_build_result(123, data).unwrap().unwrap();
+        let blamelist: Vec<String> = result
+            .blamelist
+            .iter()
+            .map(|e| e.address().to_string())
+            .collect();
+        assert_eq!(
+            blamelist,
+            vec!["a@example.com".to_string(), "b@example.com".to_string()]
+        );
+    }
 }
