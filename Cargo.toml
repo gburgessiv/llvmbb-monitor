@@ -8,3 +8,11 @@ members = [
     "calendar_check",
     "llvm_buildbot_monitor",
 ]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cast_possible_truncation = "warn"
+manual_let_else = "warn"
+must_use_candidate = "warn"

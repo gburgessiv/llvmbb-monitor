@@ -242,7 +242,15 @@ impl<'de> serde::de::Deserialize<'de> for RawBuildbotTime {
             where
                 E: serde::de::Error,
             {
+                if value < i64::MIN as f64 || value > i64::MAX as f64 {
+                    return Err(E::custom(format!("timestamp {value} out of i64 range")));
+                }
+                // Just checked this, so `allow` is fine.
+                #[allow(clippy::cast_possible_truncation)]
                 let secs = value as i64;
+                // `value - secs` should always be fractional seconds, so `* 1B` should never exceed
+                // u32.
+                #[allow(clippy::cast_possible_truncation)]
                 let nanos = ((value - secs as f64) * 1_000_000_000f64) as u32;
                 match chrono::DateTime::from_timestamp(secs, nanos) {
                     Some(x) => Ok(RawBuildbotTime(x)),
@@ -451,9 +459,8 @@ async fn concurrent_map_early_exit<
             let run = run.clone();
             tokio::spawn(async move {
                 loop {
-                    let (index, arg) = match request_stack.lock().unwrap().pop() {
-                        Some(x) => x,
-                        None => return,
+                    let Some((index, arg)) = request_stack.lock().unwrap().pop() else {
+                        return;
                     };
 
                     // The other side wants to shut down.

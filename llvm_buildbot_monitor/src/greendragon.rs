@@ -214,13 +214,10 @@ async fn fetch_single_bot_status_snapshot(
 ) -> Result<Option<Bot>> {
     let job_url = reqwest::Url::parse(&job.url)?;
 
-    let last_build = match job.last_completed_build {
-        Some(x) => x,
-        None => {
-            // If nothing's been done yet, just pretend the bot DNE. Not much else we can do,
-            // really.
-            return Ok(None);
-        }
+    let Some(last_build) = job.last_completed_build else {
+        // If nothing's been done yet, just pretend the bot DNE. Not much else we can do,
+        // really.
+        return Ok(None);
     };
     let last_build_id = last_build.number;
 
@@ -392,8 +389,15 @@ struct RawBuildbotTime(f64);
 
 impl RawBuildbotTime {
     fn as_datetime(self) -> Result<chrono::DateTime<chrono::Utc>> {
+        if self.0 < i64::MIN as f64 || self.0 > i64::MAX as f64 {
+            bail!("timestamp {} out of i64 range", self.0);
+        }
+        // Just checked this.
+        #[allow(clippy::cast_possible_truncation)]
         let millis = self.0 as i64;
         let secs = millis / 1000;
+        // `as u32` is fine, since this is at most 1B.
+        #[allow(clippy::cast_possible_truncation)]
         let nanos = ((millis % 1000) * 1_000_000) as u32;
         match chrono::DateTime::from_timestamp(secs, nanos) {
             Some(x) => Ok(x),
@@ -429,9 +433,8 @@ struct BuildResult {
 }
 
 fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<Option<CompletedBuild>> {
-    let result = match data.result {
-        Some(x) => x,
-        None => return Ok(None),
+    let Some(result) = data.result else {
+        return Ok(None);
     };
     let mut blamelist = Vec::new();
     let all_change_sets = if let Some(x) = data.change_set {
