@@ -74,12 +74,9 @@ where
             return;
         }
 
-        let min_offset = match self.offsets.values().min() {
-            None => {
-                self.values.clear();
-                return;
-            }
-            Some(x) => x,
+        let Some(min_offset) = self.offsets.values().min() else {
+            self.values.clear();
+            return;
         };
 
         let min_index = min_offset - self.base_offset;
@@ -963,9 +960,8 @@ impl MessageHandler {
             return "Need an email.".into();
         };
 
-        let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
-            Some(x) => x,
-            None => return format!("Invalid email address: {raw_email:?}"),
+        let Some(email) = Email::parse(&remove_zero_width_spaces(raw_email)) else {
+            return format!("Invalid email address: {raw_email:?}");
         };
 
         match self
@@ -1011,9 +1007,8 @@ impl MessageHandler {
             return "Need an email.".into();
         };
 
-        let email = match Email::parse(&remove_zero_width_spaces(raw_email)) {
-            Some(x) => x,
-            None => return format!("Invalid email address: {raw_email:?}"),
+        let Some(email) = Email::parse(&remove_zero_width_spaces(raw_email)) else {
+            return format!("Invalid email address: {raw_email:?}");
         };
 
         let removed = match self
@@ -1076,14 +1071,12 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         };
 
-        let status_channel = match find_channel_id("buildbot-status") {
-            Some(x) => x,
-            None => return,
+        let Some(status_channel) = find_channel_id("buildbot-status") else {
+            return;
         };
 
-        let updates_channel = match find_channel_id("buildbot-updates") {
-            Some(x) => x,
-            None => return,
+        let Some(updates_channel) = find_channel_id("buildbot-updates") else {
+            return;
         };
 
         let should_exit = {
@@ -1319,16 +1312,13 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
     let mut result = Vec::new();
     let mut remaining_message = message.as_str();
     while !remaining_message.is_empty() {
-        let size_threshold = match remaining_message.char_indices().nth(size_limit) {
-            Some((end_index, _)) => end_index,
-            None => {
-                // Peephole for if the above message.len() check was too conservative.
-                if result.is_empty() {
-                    return vec![message];
-                }
-                result.push(remaining_message.to_owned());
-                break;
+        let Some((size_threshold, _)) = remaining_message.char_indices().nth(size_limit) else {
+            // Peephole for if the above message.len() check was too conservative.
+            if result.is_empty() {
+                return vec![message];
             }
+            result.push(remaining_message.to_owned());
+            break;
         };
 
         let this_chunk: &str = &remaining_message[..size_threshold];
@@ -1342,9 +1332,8 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
                         break;
                     }
 
-                    let first_non_newline = match this_chunk[..i].rfind(|x| x != '\n') {
-                        None => break,
-                        Some(i) => i,
+                    let Some(first_non_newline) = this_chunk[..i].rfind(|x| x != '\n') else {
+                        break;
                     };
 
                     candidate = this_chunk[..first_non_newline].rfind('\n');

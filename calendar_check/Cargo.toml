@@ -6,6 +6,9 @@ license = "Apache-2.0"
 description = "Google Calendar utils for LLVM buildbot monitoring"
 authors = ["George Burgess IV <george.burgess.iv@gmail.com>"]
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1.0.95"
 chrono = "0.4.39"

@@ -6,6 +6,9 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Discord bot that monitors LLVM buildbot status and posts updates"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 calendar_check = { path = "../calendar_check" }
