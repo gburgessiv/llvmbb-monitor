@@ -20,21 +20,18 @@ lazy_static! {
         reqwest::Url::parse("https://ci.swift.org").expect("parsing greendragon URL");
 }
 
-async fn json_get<T>(client: &reqwest::Client, url: reqwest::Url) -> Result<T>
+async fn json_get<T>(client: &reqwest::Client, url: &reqwest::Url) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let url_str = url.to_string();
     let resp = client
-        .get(url)
+        .get(url.clone())
         .send()
         .await
         .and_then(|x| x.error_for_status())
-        .with_context(|| format!("requesting {url_str}"))?;
+        .with_context(|| format!("requesting {url}"))?;
 
-    resp.json()
-        .await
-        .with_context(|| format!("parsing {url_str}"))
+    resp.json().await.with_context(|| format!("parsing {url}"))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -303,17 +300,13 @@ pub(crate) async fn fetch_new_status_snapshot(
     let base_tree = "name,url,color,_class,lastCompletedBuild[number,timestamp,result,changeSet[items[authorEmail]],changeSets[items[authorEmail]]],lastSuccessfulBuild[number],lastUnsuccessfulBuild[number],firstBuild[number]";
     let tree = format!("jobs[{base_tree},jobs[{base_tree}]]");
     let overview_url = HOST.join(&format!("/job/llvm.org/view/All/api/json?tree={tree}"))?;
-    let overview: JobContainer = json_get(client, overview_url).await?;
+    let overview: JobContainer = json_get(client, &overview_url).await?;
     for bot in overview.jobs {
         to_process.push((bot.name.clone(), bot));
     }
     info!("GreenDragon: {} bots to process...", to_process.len());
 
-    let mut i = 0;
-    while i < to_process.len() {
-        let (display_name, job) = to_process[i].clone();
-        i += 1;
-
+    while let Some((display_name, job)) = to_process.pop() {
         if job.color.is_some()
             && let Some(bot) =
                 fetch_single_bot_status_snapshot(client, prev.get(&display_name), job.clone())
@@ -341,7 +334,7 @@ pub(crate) async fn fetch_new_status_snapshot(
 
             let mut tree_url = api_url.clone();
             tree_url.set_query(Some(&format!("tree={tree}")));
-            let container: JobContainer = json_get(client, tree_url).await?;
+            let container: JobContainer = json_get(client, &tree_url).await?;
             for sub_job in container.jobs {
                 to_process.push((format!("{display_name}/{}", sub_job.name), sub_job));
             }
@@ -485,7 +478,7 @@ async fn fetch_build_data(
         .push(&id.to_string())
         .push("api")
         .push("json");
-    let data: BuildResult = json_get(client, api_url).await?;
+    let data: BuildResult = json_get(client, &api_url).await?;
     let completed = process_build_result(id, data.clone())?;
     Ok((data, completed))
 }
