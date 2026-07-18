@@ -446,7 +446,7 @@ fn process_build_result(id: BuildNumber, data: BuildResult) -> Result<Option<Com
         for change_set in change_sets.items {
             match Email::parse(&change_set.author_email) {
                 Some(x) => blamelist.push(x),
-                None => warn!("Unparseable email: {:?}", &change_set.author_email),
+                None => warn!("Unparseable email: {:?}", change_set.author_email),
             }
         }
     }
