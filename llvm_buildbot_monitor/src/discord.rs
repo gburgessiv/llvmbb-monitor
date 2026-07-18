@@ -1,6 +1,6 @@
 // TODO: spawn_blocking the storage locks.
 use crate::storage::Storage;
-use crate::{Bot, BotID, BotStatusSnapshot, Email, FirstFailingBuild};
+use crate::{Blamelist, Bot, BotID, BotStatusSnapshot, Email, FirstFailingBuild};
 
 use std::borrow::{Borrow, Cow};
 use std::cell::LazyCell;
@@ -499,16 +499,24 @@ impl<'a> BlamelistCache<'a> {
         &mut self,
         target: &mut String,
         http: &Http,
-        blamelist: &[Email],
+        blamelist: &Blamelist,
         storage: &Mutex<Storage>,
     ) -> Result<()> {
         if blamelist.is_empty() {
+            if blamelist.ignored_noreply_count != 0 {
+                write!(
+                    target,
+                    " (blamelist: {} people)",
+                    blamelist.ignored_noreply_count
+                )
+                .unwrap();
+            }
             return Ok(());
         }
 
         {
             let storage = storage.lock().unwrap();
-            for email in blamelist {
+            for email in blamelist.iter() {
                 match self.email_id_mappings.entry(email.clone()) {
                     Entry::Occupied(..) => {
                         // Nothing to do, unless `storage` was updated after a prior
@@ -539,7 +547,7 @@ impl<'a> BlamelistCache<'a> {
             .map(|g| (g.user_id, g.nickname_or_default()))
             .collect::<HashMap<UserId, &str>>();
 
-        for email in blamelist {
+        for email in blamelist.iter() {
             let users_to_ping = self.email_id_mappings.get(email).unwrap();
             let mut pinged_anyone = false;
             for u in users_to_ping {
@@ -571,6 +579,9 @@ impl<'a> BlamelistCache<'a> {
                 *target += ", ";
             }
             *target += &p;
+        }
+        if blamelist.ignored_noreply_count != 0 {
+            write!(target, ", and {} others", blamelist.ignored_noreply_count).unwrap();
         }
         target.push(')');
         Ok(())

@@ -66,6 +66,35 @@ impl Email {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct Blamelist {
+    emails: Vec<Email>,
+    ignored_noreply_count: usize,
+}
+
+impl std::ops::Deref for Blamelist {
+    type Target = [Email];
+    fn deref(&self) -> &Self::Target {
+        &self.emails
+    }
+}
+
+impl From<Vec<Email>> for Blamelist {
+    fn from(emails: Vec<Email>) -> Self {
+        let original_len = emails.len();
+        let filtered_emails: Vec<Email> = emails
+            .into_iter()
+            .filter(|e| e.address.as_ref() != "noreply@github.com")
+            .collect();
+        let ignored_noreply_count = original_len - filtered_emails.len();
+
+        Self {
+            emails: filtered_emails,
+            ignored_noreply_count,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CompletedBuild {
     id: BuildNumber,
@@ -73,7 +102,7 @@ struct CompletedBuild {
     completion_time: chrono::DateTime<chrono::Utc>,
     // This is 'blame' in the same way that 'git blame' is 'blame': it's the set of authors who
     // have changes in the current build.
-    blamelist: Box<[Email]>,
+    blamelist: Blamelist,
 }
 
 #[derive(Clone, Debug)]
