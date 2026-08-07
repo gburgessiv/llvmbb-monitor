@@ -478,7 +478,6 @@ struct ChannelServer {
     status_channel: ChannelId,
     updates_channel: ChannelId,
 
-    guild_member_cache: Arc<GuildMemberCache>,
     ui: Option<Arc<UI>>,
     unsent_breakages: VecDeque<Arc<BotBuild>>,
     storage: Arc<Mutex<Storage>>,
@@ -489,16 +488,14 @@ struct ServerUIMessage {
     id: MessageId,
 }
 
-struct BlamelistCache<'a> {
+struct BlamelistCache {
     email_id_mappings: HashMap<Email, Vec<UserId>>,
-    guild_member_cache: &'a GuildMemberCache,
 }
 
-impl<'a> BlamelistCache<'a> {
-    async fn append_blamelist(
+impl BlamelistCache {
+    fn append_blamelist(
         &mut self,
         target: &mut String,
-        http: &Http,
         blamelist: &Blamelist,
         storage: &Mutex<Storage>,
     ) -> Result<()> {
@@ -531,42 +528,24 @@ impl<'a> BlamelistCache<'a> {
 
         // Invariant: All emails in the blamelist have an entry in `email_id_mappings`.
 
-        // Sometimes eliding email addresses doesn't feel like a great idea in the face of
-        // adversarial input (e.g., the owner of foo@bar.com can grab foo@baz.com so it
-        // never looks like foo@baz.com is on a blamelist, which removes some clarity and
-        // is slightly icky).
-        //
-        // On the other hand, people will hopefully be nice in practice, and it makes the
-        // UI cleaner, so...
         let mut emails: Vec<&Email> = Vec::new();
         let mut user_ids: HashSet<UserId> = HashSet::new();
-        let guild_member_storage = self.guild_member_cache.fetch_members(http).await?;
-        // TODO: Would be nice to not build this entire map up every time this function is called.
-        let guild_members = guild_member_storage
-            .iter()
-            .map(|g| (g.user_id, g.nickname_or_default()))
-            .collect::<HashMap<UserId, &str>>();
 
         for email in blamelist.iter() {
             let users_to_ping = self.email_id_mappings.get(email).unwrap();
-            let mut pinged_anyone = false;
-            for u in users_to_ping {
-                if guild_members.contains_key(u) {
-                    pinged_anyone = true;
+            if users_to_ping.is_empty() {
+                emails.push(email);
+            } else {
+                for u in users_to_ping {
                     user_ids.insert(*u);
                 }
-            }
-
-            if !pinged_anyone {
-                emails.push(email);
             }
         }
 
         emails.sort_unstable();
 
-        // Invariant: All users in user_ids have an entry in `guild_members`.
         let mut user_ids: Vec<_> = user_ids.into_iter().collect();
-        user_ids.sort_unstable_by_key(|x| (guild_members.get(x).unwrap(), *x));
+        user_ids.sort_unstable();
 
         let to_blame = user_ids
             .into_iter()
@@ -730,7 +709,6 @@ impl ChannelServer {
     async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
         let mut blamelist_cache = BlamelistCache {
             email_id_mappings: Default::default(),
-            guild_member_cache: &self.guild_member_cache,
         };
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
@@ -779,14 +757,11 @@ impl ChannelServer {
                         )
                         .unwrap();
                     } else {
-                        blamelist_cache
-                            .append_blamelist(
-                                &mut current_message,
-                                http,
-                                &x.blamelist,
-                                &self.storage,
-                            )
-                            .await?;
+                        blamelist_cache.append_blamelist(
+                            &mut current_message,
+                            &x.blamelist,
+                            &self.storage,
+                        )?;
                     }
                 }
                 FirstFailingBuild::Extrapolated { .. } => {
@@ -1178,7 +1153,6 @@ impl serenity::client::EventHandler for MessageHandler {
                 status_channel,
                 updates_channel,
 
-                guild_member_cache,
                 ui: None,
                 unsent_breakages: VecDeque::new(),
                 storage,
