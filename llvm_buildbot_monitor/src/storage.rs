@@ -200,9 +200,7 @@ mod test {
                     .fetch_all_email_userids_mappings()
                     .expect("failed fetching userids");
                 assert!(
-                    mappings
-                        .get(&Email::parse("foo@bar.com").expect("broken email"))
-                        .is_none()
+                    !mappings.contains_key(&Email::parse("foo@bar.com").expect("broken email"))
                 );
             }
 
@@ -267,7 +265,7 @@ mod test {
             let mappings = storage
                 .fetch_all_email_userids_mappings()
                 .expect("failed fetching userids");
-            assert!(mappings.get(&email).is_none());
+            assert!(!mappings.contains_key(&email));
         }
     }
 
