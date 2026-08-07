@@ -1,6 +1,8 @@
 use crate::Email;
 
 use std::cmp::min;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -15,8 +17,12 @@ fn db_to_userid(uid: i64) -> UserId {
     UserId::new(uid as u64)
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmailMappingsEpoch(u64);
+
 pub(crate) struct Storage {
     conn: rusqlite::Connection,
+    epoch: AtomicU64,
 }
 
 impl Storage {
@@ -57,7 +63,10 @@ impl Storage {
             keep_waiting
         }))?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            epoch: AtomicU64::new(0),
+        })
     }
 
     #[cfg(test)]
@@ -69,26 +78,37 @@ impl Storage {
         Self::init_db(rusqlite::Connection::open(file_path)?)
     }
 
+    pub(crate) fn email_mappings_epoch(&self) -> EmailMappingsEpoch {
+        EmailMappingsEpoch(self.epoch.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn add_user_email_mapping(&self, id: UserId, email: &Email) -> Result<()> {
-        self.conn.execute(
+        let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO email_mappings (user_id, email) VALUES (?, ?)",
             params![userid_to_db(id), email.address()],
         )?;
+        if inserted > 0 {
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
-    pub(crate) fn find_userids_for(&self, email: &Email) -> Result<Vec<UserId>> {
+    pub(crate) fn fetch_all_email_userids_mappings(&self) -> Result<HashMap<Email, Vec<UserId>>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT user_id FROM email_mappings WHERE email = ?")?;
-        let iter = stmt.query_map(params![email.address()], |row| {
-            let val: i64 = row.get(0)?;
-            Ok(db_to_userid(val))
+            .prepare_cached("SELECT email, user_id FROM email_mappings")?;
+        let iter = stmt.query_map(params![], |row| {
+            let email_str: String = row.get(0)?;
+            let uid: i64 = row.get(1)?;
+            Ok((email_str, db_to_userid(uid)))
         })?;
 
-        let mut result = Vec::new();
+        let mut result: HashMap<Email, Vec<UserId>> = HashMap::new();
         for elem in iter {
-            result.push(elem?);
+            let (email_str, uid) = elem?;
+            if let Some(email) = Email::parse(&email_str) {
+                result.entry(email).or_default().push(uid);
+            }
         }
         Ok(result)
     }
@@ -118,6 +138,9 @@ impl Storage {
             "DELETE FROM email_mappings WHERE user_id = ? AND email = ?",
             params![userid_to_db(id), email.address()],
         )?;
+        if num_deleted > 0 {
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(num_deleted != 0)
     }
 
@@ -173,10 +196,14 @@ mod test {
             }
 
             {
-                let userids = storage
-                    .find_userids_for(&Email::parse("foo@bar.com").expect("broken email"))
+                let mappings = storage
+                    .fetch_all_email_userids_mappings()
                     .expect("failed fetching userids");
-                assert!(userids.is_empty());
+                assert!(
+                    mappings
+                        .get(&Email::parse("foo@bar.com").expect("broken email"))
+                        .is_none()
+                );
             }
 
             {
@@ -198,10 +225,10 @@ mod test {
             .expect("adding mapping");
 
         {
-            let userids = storage
-                .find_userids_for(&email)
+            let mappings = storage
+                .fetch_all_email_userids_mappings()
                 .expect("failed fetching userids");
-            assert_eq!(&userids, &[id]);
+            assert_eq!(mappings.get(&email), Some(&vec![id]));
         }
 
         {
@@ -225,10 +252,10 @@ mod test {
         assert!(!removed);
 
         {
-            let userids = storage
-                .find_userids_for(&email)
+            let mappings = storage
+                .fetch_all_email_userids_mappings()
                 .expect("failed fetching userids");
-            assert_eq!(&userids, &[id]);
+            assert_eq!(mappings.get(&email), Some(&vec![id]));
         }
 
         let removed = storage
@@ -237,10 +264,10 @@ mod test {
         assert!(removed);
 
         {
-            let userids = storage
-                .find_userids_for(&email)
+            let mappings = storage
+                .fetch_all_email_userids_mappings()
                 .expect("failed fetching userids");
-            assert!(userids.is_empty());
+            assert!(mappings.get(&email).is_none());
         }
     }
 
@@ -257,10 +284,10 @@ mod test {
             .expect("adding mapping");
 
         {
-            let userids = storage
-                .find_userids_for(&email)
+            let mappings = storage
+                .fetch_all_email_userids_mappings()
                 .expect("failed fetching userids");
-            assert_eq!(&userids, &[id]);
+            assert_eq!(mappings.get(&email), Some(&vec![id]));
         }
 
         {
@@ -286,11 +313,11 @@ mod test {
             }
         }
 
+        let mappings = storage
+            .fetch_all_email_userids_mappings()
+            .expect("failed fetching userids");
         for email in &emails {
-            let db_ids = storage
-                .find_userids_for(email)
-                .expect("failed fetching userids");
-            assert_eq!(&db_ids, &ids);
+            assert_eq!(mappings.get(email), Some(&ids.to_vec()));
         }
 
         for id in &ids {
@@ -315,5 +342,40 @@ mod test {
 
         storage.remove_sent_calendar_ping(ids[0]).unwrap();
         assert_eq!(&storage.load_all_sent_calendar_pings().unwrap(), &ids[1..]);
+    }
+
+    #[test]
+    fn test_epoch_and_fetch_all_email_userids_mappings() {
+        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(0));
+
+        let email1 = Email::parse("user1@example.com").unwrap();
+        let email2 = Email::parse("user2@example.com").unwrap();
+        let uid1 = db_to_userid(100);
+        let uid2 = db_to_userid(200);
+
+        storage.add_user_email_mapping(uid1, &email1).unwrap();
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(1));
+
+        storage.add_user_email_mapping(uid2, &email1).unwrap();
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(2));
+
+        storage.add_user_email_mapping(uid2, &email2).unwrap();
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(3));
+
+        // Adding duplicate mapping should not increment epoch.
+        storage.add_user_email_mapping(uid2, &email2).unwrap();
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(3));
+
+        let all = storage.fetch_all_email_userids_mappings().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get(&email1), Some(&vec![uid1, uid2]));
+        assert_eq!(all.get(&email2), Some(&vec![uid2]));
+
+        storage.remove_userid_mapping(uid1, &email1).unwrap();
+        assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(4));
+
+        let all_after = storage.fetch_all_email_userids_mappings().unwrap();
+        assert_eq!(all_after.get(&email1), Some(&vec![uid2]));
     }
 }

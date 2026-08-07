@@ -1,5 +1,5 @@
 // TODO: spawn_blocking the storage locks.
-use crate::storage::Storage;
+use crate::storage::{EmailMappingsEpoch, Storage};
 use crate::{Blamelist, Bot, BotID, BotStatusSnapshot, Email, FirstFailingBuild};
 
 use std::borrow::{Borrow, Cow};
@@ -488,8 +488,10 @@ struct ServerUIMessage {
     id: MessageId,
 }
 
+#[derive(Default)]
 struct BlamelistCache {
-    email_id_mappings: HashMap<Email, Vec<UserId>>,
+    last_epoch: Option<EmailMappingsEpoch>,
+    mappings: HashMap<Email, Vec<UserId>>,
 }
 
 impl BlamelistCache {
@@ -513,32 +515,27 @@ impl BlamelistCache {
 
         {
             let storage = storage.lock().unwrap();
-            for email in blamelist.iter() {
-                match self.email_id_mappings.entry(email.clone()) {
-                    Entry::Occupied(..) => {
-                        // Nothing to do, unless `storage` was updated after a prior
-                        // iteration of this loop. If that happens, eh. It's a race anyway.
-                    }
-                    Entry::Vacant(x) => {
-                        x.insert(storage.find_userids_for(email)?);
-                    }
-                }
+            let current_epoch = storage.email_mappings_epoch();
+            if self.last_epoch != Some(current_epoch) {
+                self.mappings = storage.fetch_all_email_userids_mappings()?;
+                self.last_epoch = Some(current_epoch);
             }
         }
-
-        // Invariant: All emails in the blamelist have an entry in `email_id_mappings`.
 
         let mut emails: Vec<&Email> = Vec::new();
         let mut user_ids: HashSet<UserId> = HashSet::new();
 
         for email in blamelist.iter() {
-            let users_to_ping = self.email_id_mappings.get(email).unwrap();
-            if users_to_ping.is_empty() {
-                emails.push(email);
-            } else {
-                for u in users_to_ping {
-                    user_ids.insert(*u);
+            if let Some(users_to_ping) = self.mappings.get(email) {
+                if users_to_ping.is_empty() {
+                    emails.push(email);
+                } else {
+                    for u in users_to_ping {
+                        user_ids.insert(*u);
+                    }
                 }
+            } else {
+                emails.push(email);
             }
         }
 
@@ -707,9 +704,7 @@ impl ChannelServer {
     }
 
     async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
-        let mut blamelist_cache = BlamelistCache {
-            email_id_mappings: Default::default(),
-        };
+        let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
 
