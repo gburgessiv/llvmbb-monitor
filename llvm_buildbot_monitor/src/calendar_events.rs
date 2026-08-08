@@ -99,7 +99,7 @@ fn load_and_gc_previous_calendar_pings(
     // the server at least a few times a month, and we'll probably top out at a
     // few dozen pings per week.
     if !previous_pings.is_empty() {
-        let storage = storage.lock().unwrap();
+        let mut storage = storage.lock().unwrap();
         for gc_ping in previous_pings {
             if let Err(x) = storage.remove_sent_calendar_ping(&gc_ping) {
                 error!("Failed removing ping {gc_ping:?} from sqlite: {x}");

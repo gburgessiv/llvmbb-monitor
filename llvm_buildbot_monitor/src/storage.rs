@@ -2,7 +2,6 @@ use crate::Email;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -22,7 +21,7 @@ pub(crate) struct EmailMappingsEpoch(u64);
 
 pub(crate) struct Storage {
     conn: rusqlite::Connection,
-    epoch: AtomicU64,
+    epoch: u64,
 }
 
 impl Storage {
@@ -63,10 +62,7 @@ impl Storage {
             keep_waiting
         }))?;
 
-        Ok(Self {
-            conn,
-            epoch: AtomicU64::new(0),
-        })
+        Ok(Self { conn, epoch: 0 })
     }
 
     #[cfg(test)]
@@ -79,21 +75,23 @@ impl Storage {
     }
 
     pub(crate) fn email_mappings_epoch(&self) -> EmailMappingsEpoch {
-        EmailMappingsEpoch(self.epoch.load(Ordering::Relaxed))
+        EmailMappingsEpoch(self.epoch)
     }
 
-    pub(crate) fn add_user_email_mapping(&self, id: UserId, email: &Email) -> Result<()> {
+    pub(crate) fn add_user_email_mapping(&mut self, id: UserId, email: &Email) -> Result<()> {
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO email_mappings (user_id, email) VALUES (?, ?)",
             params![userid_to_db(id), email.address()],
         )?;
         if inserted > 0 {
-            self.epoch.fetch_add(1, Ordering::Relaxed);
+            self.epoch += 1;
         }
         Ok(())
     }
 
-    pub(crate) fn fetch_all_email_userids_mappings(&self) -> Result<HashMap<Email, Vec<UserId>>> {
+    pub(crate) fn fetch_all_email_userids_mappings(
+        &mut self,
+    ) -> Result<HashMap<Email, Vec<UserId>>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT email, user_id FROM email_mappings")?;
@@ -113,7 +111,7 @@ impl Storage {
         Ok(result)
     }
 
-    pub(crate) fn find_emails_for(&self, id: UserId) -> Result<Vec<Email>> {
+    pub(crate) fn find_emails_for(&mut self, id: UserId) -> Result<Vec<Email>> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT email FROM email_mappings WHERE user_id = ?")?;
@@ -133,18 +131,18 @@ impl Storage {
         Ok(result)
     }
 
-    pub(crate) fn remove_userid_mapping(&self, id: UserId, email: &Email) -> Result<bool> {
+    pub(crate) fn remove_userid_mapping(&mut self, id: UserId, email: &Email) -> Result<bool> {
         let num_deleted = self.conn.execute(
             "DELETE FROM email_mappings WHERE user_id = ? AND email = ?",
             params![userid_to_db(id), email.address()],
         )?;
         if num_deleted > 0 {
-            self.epoch.fetch_add(1, Ordering::Relaxed);
+            self.epoch += 1;
         }
         Ok(num_deleted != 0)
     }
 
-    pub(crate) fn add_sent_calendar_ping(&self, calendar_event_id: &str) -> Result<()> {
+    pub(crate) fn add_sent_calendar_ping(&mut self, calendar_event_id: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO sent_calendar_pings (event_id) VALUES (?)",
             params![calendar_event_id],
@@ -152,7 +150,7 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) fn load_all_sent_calendar_pings(&self) -> Result<Vec<String>> {
+    pub(crate) fn load_all_sent_calendar_pings(&mut self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT event_id FROM sent_calendar_pings")?;
@@ -168,7 +166,7 @@ impl Storage {
         Ok(result)
     }
 
-    pub(crate) fn remove_sent_calendar_ping(&self, calendar_event_id: &str) -> Result<()> {
+    pub(crate) fn remove_sent_calendar_ping(&mut self, calendar_event_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM sent_calendar_pings WHERE event_id = ?",
             params![calendar_event_id],
@@ -183,7 +181,7 @@ mod test {
 
     #[test]
     fn test_userid_association_empty_queries() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
 
         for with_row in &[false, true] {
             if *with_row {
@@ -215,7 +213,7 @@ mod test {
 
     #[test]
     fn test_userid_mapping_one_to_one_works() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         let email = Email::parse("foo@bar.com").expect("broken email");
         let id = db_to_userid(123);
         storage
@@ -237,7 +235,7 @@ mod test {
 
     #[test]
     fn test_removal_reports_successful_removals() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         let email = Email::parse("foo@bar.com").expect("broken email");
         let id = db_to_userid(123);
         storage
@@ -271,7 +269,7 @@ mod test {
 
     #[test]
     fn test_multiple_identical_mappings_work_silently() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         let email = Email::parse("foo@bar.com").expect("broken email");
         let id = db_to_userid(123);
         storage
@@ -296,7 +294,7 @@ mod test {
 
     #[test]
     fn test_userid_mapping_many_to_many_works() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         let emails = [
             Email::parse("0@bar.com").expect("broken email"),
             Email::parse("1@bar.com").expect("broken email"),
@@ -330,7 +328,7 @@ mod test {
     fn test_calendar_ping_id_operations() {
         let ids = ["a", "b", "c"];
 
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         assert!(storage.load_all_sent_calendar_pings().unwrap().is_empty());
 
         for id in ids {
@@ -344,7 +342,7 @@ mod test {
 
     #[test]
     fn test_epoch_and_fetch_all_email_userids_mappings() {
-        let storage = Storage::from_memory().expect("Failed making in-memory db");
+        let mut storage = Storage::from_memory().expect("Failed making in-memory db");
         assert_eq!(storage.email_mappings_epoch(), EmailMappingsEpoch(0));
 
         let email1 = Email::parse("user1@example.com").unwrap();

@@ -514,7 +514,7 @@ impl BlamelistCache {
         }
 
         {
-            let storage = storage.lock().unwrap();
+            let mut storage = storage.lock().unwrap();
             let current_epoch = storage.email_mappings_epoch();
             if self.last_epoch != Some(current_epoch) {
                 self.mappings = storage.fetch_all_email_userids_mappings()?;
