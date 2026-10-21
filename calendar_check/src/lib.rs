@@ -43,7 +43,7 @@ pub struct CommunityEvent {
     pub end_time: UtcTime,
     pub title: CompactString,
     pub id: CompactString,
-    pub event_link: Box<str>,
+    pub event_link: CompactString,
     pub description_data: CommunityEventDescriptionData,
 }
 
@@ -304,9 +304,9 @@ struct GoogleCalendarEvent {
     description: Option<String>,
     end: Option<GoogleCalendarEventTime>,
     start: Option<GoogleCalendarEventTime>,
-    id: String,
+    id: CompactString,
     html_link: String,
-    summary: String,
+    summary: CompactString,
 }
 
 fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> Vec<CommunityEvent> {
@@ -338,8 +338,8 @@ fn convert_cal_events_to_office_hours(cal_events: Vec<GoogleCalendarEvent>) -> V
         results.push(CommunityEvent {
             start_time,
             end_time,
-            title: event_title.into(),
-            id: event.id.into(),
+            title: event_title,
+            id: event.id,
             event_link: event.html_link.into(),
             description_data,
         });

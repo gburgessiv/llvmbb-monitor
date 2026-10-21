@@ -158,7 +158,7 @@ impl Storage {
             .conn
             .prepare("SELECT event_id FROM sent_calendar_pings")?;
         let iter = stmt.query_map(params![], |row| {
-            let val: String = row.get(0)?;
+            let val = row.get_ref(0)?.as_str()?;
             Ok(CompactString::new(val))
         })?;
 

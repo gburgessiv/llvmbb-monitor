@@ -285,22 +285,14 @@ fn build_community_event_announce_message(
 
     // Append unresolved usernames as `@user` even though that won't tag them,
     // as the desired effect is signalling that they couldn't be looked up clearly.
-    let all_mentions = resolved_ids
-        .into_iter()
-        .map(|id| format_compact!("<@{id}>"))
-        .chain(
-            unresolved_names
-                .into_iter()
-                .map(|name| format_compact!("@{name}")),
-        );
-
-    for (i, mention) in all_mentions.enumerate() {
-        if i == 0 {
-            result += " /cc ";
-        } else {
-            result += ", ";
-        }
-        result += &mention;
+    let mut prefix = " /cc ";
+    for id in resolved_ids {
+        write!(&mut result, "{prefix}<@{id}>").unwrap();
+        prefix = ", ";
+    }
+    for name in unresolved_names {
+        write!(&mut result, "{prefix}@{name}").unwrap();
+        prefix = ", ";
     }
     return result;
 
@@ -320,7 +312,7 @@ impl ChannelEventBroadcaster {
             .context("getting guild channels")?;
         Ok(channels
             .into_iter()
-            .map(|x| (CompactString::new(x.name), x.id))
+            .map(|x| (x.name.into(), x.id))
             .collect())
     }
 
@@ -436,7 +428,7 @@ impl ChannelEventBroadcaster {
                 .description_data
                 .mention_channels
                 .iter()
-                .map(|x| x.as_str())
+                .map(CompactString::as_str)
                 .chain(implicit_office_hours_channel);
             let channel_ids = self
                 .lookup_channel_ids(
@@ -469,7 +461,7 @@ impl ChannelEventBroadcaster {
                         .description_data
                         .mention_users
                         .iter()
-                        .map(|x| x.as_str()),
+                        .map(CompactString::as_str),
                 )
                 .await;
 
@@ -572,17 +564,21 @@ impl BlamelistCache {
         let mut user_ids: Vec<_> = user_ids.into_iter().collect();
         user_ids.sort_unstable();
 
-        let to_blame = user_ids
-            .into_iter()
-            .map(|x| format_compact!("<@{x}>"))
-            .chain(emails.into_iter().map(discord_safe_email));
-
         *target += " (blamelist: ";
-        for (i, p) in to_blame.enumerate() {
-            if i != 0 {
+        let mut first = true;
+        for uid in user_ids {
+            if !first {
                 *target += ", ";
             }
-            *target += &p;
+            first = false;
+            write!(target, "<@{uid}>").unwrap();
+        }
+        for email in emails {
+            if !first {
+                *target += ", ";
+            }
+            first = false;
+            append_discord_safe_email(target, email);
         }
         if blamelist.ignored_noreply_count != 0 {
             write!(target, ", and {} others", blamelist.ignored_noreply_count).unwrap();
@@ -613,9 +609,8 @@ fn find_exact_username_match(
 async fn resolve_username_to_user_id(
     http: &Http,
     guild_id: GuildId,
-    raw_username: &str,
+    clean_name: &str,
 ) -> Result<Option<UserId>> {
-    let clean_name = sanitize_username_query(raw_username);
     if clean_name.is_empty() {
         return Ok(None);
     }
@@ -630,7 +625,7 @@ async fn resolve_username_to_user_id(
 
 struct MemberResolver {
     guild_id: GuildId,
-    cache: HashMap<CompactString, UserId>,
+    cache: HashMap<CompactString, Option<UserId>>,
 }
 
 impl MemberResolver {
@@ -642,20 +637,26 @@ impl MemberResolver {
     }
 
     async fn get_or_resolve(&mut self, http: &Http, raw_username: &str) -> Result<Option<UserId>> {
-        let normalized = sanitize_username_query(raw_username).to_lowercase();
-        if normalized.is_empty() {
+        let clean = sanitize_username_query(raw_username);
+        if clean.is_empty() {
             return Ok(None);
         }
 
-        if let Some(&user_id) = self.cache.get(normalized.as_str()) {
-            return Ok(Some(user_id));
+        if !clean.bytes().any(|b| b.is_ascii_uppercase())
+            && let Some(&cached) = self.cache.get(clean)
+        {
+            return Ok(cached);
+        }
+
+        let mut normalized = CompactString::new(clean);
+        normalized.make_ascii_lowercase();
+
+        if let Some(&cached) = self.cache.get(&normalized) {
+            return Ok(cached);
         }
 
         let resolved = resolve_username_to_user_id(http, self.guild_id, &normalized).await?;
-        if let Some(user_id) = resolved {
-            self.cache.insert(CompactString::new(normalized), user_id);
-        }
-
+        self.cache.insert(normalized, resolved);
         Ok(resolved)
     }
 }
@@ -732,10 +733,11 @@ impl ChannelServer {
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
 
-            let (bot_category, bot_name) = match &next_breakage.bot_id {
-                BotID::GreenDragon { name } => ("GreenDragon", name.as_str()),
-                BotID::Lab { name, .. } => ("Lab", name.as_str()),
+            let bot_category = match &next_breakage.bot_id {
+                BotID::GreenDragon { .. } => "GreenDragon",
+                BotID::Lab { .. } => "Lab",
             };
+            let bot_name = next_breakage.bot_id.name();
 
             write!(
                 current_message,
@@ -939,10 +941,6 @@ fn remove_zero_width_spaces(x: &str) -> Cow<'_, str> {
 
     let result = x.replace(space, "");
     Cow::Owned(result)
-}
-
-fn discord_safe_email(email: &Email) -> CompactString {
-    format_compact!("{}@\u{200B}{}", email.account_with_plus(), email.domain())
 }
 
 impl MessageHandler {
@@ -1357,19 +1355,17 @@ fn duration_to_shorthand(dur: chrono::Duration) -> CompactString {
     if dur < chrono::Duration::seconds(60) {
         return "<1 minute".into();
     }
-    if dur < chrono::Duration::minutes(60) {
-        let m = dur.num_minutes();
-        return format_compact!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
-    }
-    if dur < chrono::Duration::days(1) {
-        let h = dur.num_hours();
-        return format_compact!("{} {}", h, if h == 1 { "hour" } else { "hours" });
-    }
-    if dur < chrono::Duration::days(28) {
-        let d = dur.num_days();
-        return format_compact!("{} {}", d, if d == 1 { "day" } else { "days" });
-    }
-    format_compact!("{} weeks", dur.num_weeks())
+    let (count, unit) = if dur < chrono::Duration::minutes(60) {
+        (dur.num_minutes(), "minute")
+    } else if dur < chrono::Duration::days(1) {
+        (dur.num_hours(), "hour")
+    } else if dur < chrono::Duration::days(28) {
+        (dur.num_days(), "day")
+    } else {
+        (dur.num_weeks(), "week")
+    };
+    let suffix = if count == 1 { "" } else { "s" };
+    format_compact!("{count} {unit}{suffix}")
 }
 
 // Eh.

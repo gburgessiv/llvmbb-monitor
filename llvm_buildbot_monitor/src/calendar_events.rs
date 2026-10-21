@@ -79,7 +79,7 @@ fn load_and_gc_previous_calendar_pings(
     state: &State,
 ) -> HashSet<CompactString> {
     let mut previous_pings = match storage.lock().unwrap().load_all_sent_calendar_pings() {
-        Ok(p) => p.into_iter().collect::<HashSet<CompactString>>(),
+        Ok(p) => p.into_iter().collect::<HashSet<_>>(),
         Err(x) => {
             error!("Error loading previous calendar pings; starting fresh: {x}");
             return Default::default();
@@ -102,7 +102,7 @@ fn load_and_gc_previous_calendar_pings(
     if !previous_pings.is_empty() {
         let storage = storage.lock().unwrap();
         for gc_ping in previous_pings {
-            if let Err(x) = storage.remove_sent_calendar_ping(gc_ping.as_str()) {
+            if let Err(x) = storage.remove_sent_calendar_ping(&gc_ping) {
                 error!("Failed removing ping {gc_ping:?} from sqlite: {x}");
             }
         }
@@ -139,7 +139,7 @@ fn run_discord_pings(
     // complete soon enough anyway.
     std::mem::drop(tokio::task::spawn_blocking(move || {
         for i in successful_pings {
-            let id = state.events[i].id.as_ref();
+            let id = &state.events[i].id;
             if let Err(x) = storage.lock().unwrap().add_sent_calendar_ping(id) {
                 error!("Failed adding sent calendar ping to storage: {x}");
             }

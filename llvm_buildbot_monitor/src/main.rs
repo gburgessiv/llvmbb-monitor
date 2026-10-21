@@ -32,24 +32,25 @@ enum BuildbotResult {
 #[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
 struct Email {
     address: CompactString,
-    at_loc: usize,
 }
 
 impl Email {
     fn parse(from: &str) -> Option<Email> {
-        from.find('@').map(|x| Email {
-            // FIXME: to_lowercase here is a bit of a hack.
-            address: from.to_lowercase().into(),
-            at_loc: x,
-        })
+        from.find('@')?;
+        let address: CompactString = if from.chars().any(|c| c.is_uppercase()) {
+            from.chars().flat_map(|c| c.to_lowercase()).collect()
+        } else {
+            CompactString::new(from)
+        };
+        Some(Email { address })
     }
 
     fn account_with_plus(&self) -> &str {
-        &self.address[..self.at_loc]
+        self.address.split_once('@').expect("valid email has @").0
     }
 
     fn domain(&self) -> &str {
-        &self.address[self.at_loc + 1..]
+        self.address.split_once('@').expect("valid email has @").1
     }
 
     fn address(&self) -> &str {
@@ -58,11 +59,8 @@ impl Email {
 
     #[cfg(test)]
     fn from_parts(account: &str, domain: &str) -> Email {
-        let address = format!("{account}@{domain}");
-        let at_loc = account.len();
         Email {
-            address: address.into(),
-            at_loc,
+            address: compact_str::format_compact!("{account}@{domain}"),
         }
     }
 }
@@ -81,16 +79,13 @@ impl std::ops::Deref for Blamelist {
 }
 
 impl From<Vec<Email>> for Blamelist {
-    fn from(emails: Vec<Email>) -> Self {
+    fn from(mut emails: Vec<Email>) -> Self {
         let original_len = emails.len();
-        let filtered_emails: Vec<Email> = emails
-            .into_iter()
-            .filter(|e| e.address.as_str() != "noreply@github.com")
-            .collect();
-        let ignored_noreply_count = original_len - filtered_emails.len();
+        emails.retain(|e| e.address() != "noreply@github.com");
+        let ignored_noreply_count = original_len - emails.len();
 
         Self {
-            emails: filtered_emails,
+            emails,
             ignored_noreply_count,
         }
     }
@@ -165,6 +160,14 @@ enum BotID {
     GreenDragon { name: CompactString },
 }
 
+impl BotID {
+    fn name(&self) -> &str {
+        match self {
+            BotID::Lab { name, .. } | BotID::GreenDragon { name } => name.as_str(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct BotStatusSnapshot {
     bots: HashMap<BotID, Bot>,
@@ -237,7 +240,7 @@ async fn publish_forever(
                 (
                     BotID::Lab {
                         id: *id,
-                        name: name.as_str().into(),
+                        name: CompactString::new(name),
                     },
                     bot.clone(),
                 )
@@ -245,7 +248,7 @@ async fn publish_forever(
             .chain(last_greendragon_snapshot.iter().map(|(name, bot)| {
                 (
                     BotID::GreenDragon {
-                        name: name.as_str().into(),
+                        name: CompactString::new(name),
                     },
                     bot.clone(),
                 )
