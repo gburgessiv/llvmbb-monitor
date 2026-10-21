@@ -229,7 +229,7 @@ struct ChannelEventBroadcaster {
 
 fn build_community_event_announce_message(
     event: &CommunityEvent,
-    users_to_mention: &[UserId],
+    resolved_users: &HashMap<&str, UserId>,
 ) -> String {
     // The URL is generally pretty long, so just start with a 128b buffer.
     let mut result = String::with_capacity(128);
@@ -261,13 +261,41 @@ fn build_community_event_announce_message(
         .unwrap();
     }
 
-    for (i, user_id) in users_to_mention.iter().enumerate() {
+    let mention_user_names = &event.description_data.mention_users;
+    if mention_user_names.is_empty() {
+        return result;
+    }
+
+    let mut resolved_ids = Vec::new();
+    let mut unresolved_names = Vec::new();
+    for username in mention_user_names {
+        let username = username.as_ref();
+        if let Some(&user_id) = resolved_users.get(username) {
+            resolved_ids.push(user_id);
+        } else {
+            unresolved_names.push(username);
+        }
+    }
+
+    resolved_ids.sort_unstable();
+    resolved_ids.dedup();
+    unresolved_names.sort_unstable();
+    unresolved_names.dedup();
+
+    // Append unresolved usernames as `@user` even though that won't tag them,
+    // as the desired effect is signalling that they couldn't be looked up clearly.
+    let all_mentions = resolved_ids
+        .into_iter()
+        .map(|id| format!("<@{id}>"))
+        .chain(unresolved_names.into_iter().map(|name| format!("@{name}")));
+
+    for (i, mention) in all_mentions.enumerate() {
         if i == 0 {
             result += " /cc ";
         } else {
             result += ", ";
         }
-        write!(&mut result, "<@{user_id}>").unwrap();
+        result += &mention;
     }
     return result;
 
@@ -348,18 +376,20 @@ impl ChannelEventBroadcaster {
         channel_ids
     }
 
-    async fn lookup_user_ids(
+    async fn lookup_user_ids<'a>(
         &mut self,
         http: &Http,
-        user_names: impl Iterator<Item = &str>,
-    ) -> Vec<UserId> {
-        let mut user_ids = Vec::new();
+        user_names: impl Iterator<Item = &'a str>,
+    ) -> HashMap<&'a str, UserId> {
+        let mut user_ids = HashMap::new();
         for target_name in user_names {
             match self.member_resolver.get_or_resolve(http, target_name).await {
-                Ok(Some(user_id)) => user_ids.push(user_id),
+                Ok(Some(user_id)) => {
+                    user_ids.insert(target_name, user_id);
+                }
                 Ok(None) => {
                     warn!(
-                        "User {target_name:?} could not be found in guild {}; ignoring",
+                        "User {target_name:?} could not be found in guild {}",
                         self.guild_id
                     );
                 }
@@ -372,8 +402,6 @@ impl ChannelEventBroadcaster {
             }
         }
 
-        user_ids.sort_unstable();
-        user_ids.dedup();
         user_ids
     }
 
@@ -1792,7 +1820,7 @@ mod test {
                 event_link: "http://link".into(),
                 ..Default::default()
             },
-            /*users_to_mention=*/ &[],
+            /*resolved_users=*/ &HashMap::new(),
         );
         assert_eq!(
             msg,
@@ -1802,7 +1830,11 @@ mod test {
             )
         );
 
-        let users_to_mention = [UserId::new(1234), UserId::new(4321)];
+        let resolved_users = HashMap::from([
+            ("bar", UserId::new(1234)),
+            ("foo", UserId::new(4321)),
+            // Don't have a mapping for 'baz', so the fallback for that can be tested.
+        ]);
         let msg = build_community_event_announce_message(
             &CommunityEvent {
                 start_time: DateTime::from_timestamp(1234, 1).unwrap(),
@@ -1814,14 +1846,14 @@ mod test {
                 },
                 ..Default::default()
             },
-            &users_to_mention,
+            &resolved_users,
         );
 
         assert_eq!(
             msg,
             concat!(
                 "The `baz!` office hours event is scheduled to start <t:1234:R>! ",
-                "[Click here](<http://link>) for more. /cc <@1234>, <@4321>"
+                "[Click here](<http://link>) for more. /cc <@1234>, <@4321>, @baz"
             )
         );
     }
@@ -1906,7 +1938,7 @@ mod test {
                 },
                 ..Default::default()
             },
-            /*users_to_mention=*/ &[],
+            /*resolved_users=*/ &HashMap::new(),
         );
         assert_eq!(
             msg,
