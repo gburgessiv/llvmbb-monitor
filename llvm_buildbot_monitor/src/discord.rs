@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use calendar_check::CommunityEvent;
+use compact_str::{CompactString, format_compact};
 use log::{error, info, warn};
 use serenity::async_trait;
 use serenity::builder;
@@ -286,8 +287,12 @@ fn build_community_event_announce_message(
     // as the desired effect is signalling that they couldn't be looked up clearly.
     let all_mentions = resolved_ids
         .into_iter()
-        .map(|id| format!("<@{id}>"))
-        .chain(unresolved_names.into_iter().map(|name| format!("@{name}")));
+        .map(|id| format_compact!("<@{id}>"))
+        .chain(
+            unresolved_names
+                .into_iter()
+                .map(|name| format_compact!("@{name}")),
+        );
 
     for (i, mention) in all_mentions.enumerate() {
         if i == 0 {
@@ -622,7 +627,7 @@ async fn resolve_username_to_user_id(
 
 struct MemberResolver {
     guild_id: GuildId,
-    cache: HashMap<String, UserId>,
+    cache: HashMap<CompactString, UserId>,
 }
 
 impl MemberResolver {
@@ -639,13 +644,13 @@ impl MemberResolver {
             return Ok(None);
         }
 
-        if let Some(&user_id) = self.cache.get(&normalized) {
+        if let Some(&user_id) = self.cache.get(normalized.as_str()) {
             return Ok(Some(user_id));
         }
 
         let resolved = resolve_username_to_user_id(http, self.guild_id, &normalized).await?;
         if let Some(user_id) = resolved {
-            self.cache.insert(normalized, user_id);
+            self.cache.insert(CompactString::new(normalized), user_id);
         }
 
         Ok(resolved)
