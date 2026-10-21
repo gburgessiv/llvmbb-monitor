@@ -79,7 +79,7 @@ fn load_and_gc_previous_calendar_pings(
     state: &State,
 ) -> HashSet<CompactString> {
     let mut previous_pings = match storage.lock().unwrap().load_all_sent_calendar_pings() {
-        Ok(p) => p.into_iter().collect::<HashSet<String>>(),
+        Ok(p) => p.into_iter().collect::<HashSet<CompactString>>(),
         Err(x) => {
             error!("Error loading previous calendar pings; starting fresh: {x}");
             return Default::default();
@@ -88,8 +88,8 @@ fn load_and_gc_previous_calendar_pings(
 
     let mut result = HashSet::new();
     for event in &state.events {
-        if let Some(s) = previous_pings.take(event.id.as_str()) {
-            result.insert(s.into());
+        if let Some(s) = previous_pings.take(&event.id) {
+            result.insert(s);
         }
     }
 
@@ -102,7 +102,7 @@ fn load_and_gc_previous_calendar_pings(
     if !previous_pings.is_empty() {
         let storage = storage.lock().unwrap();
         for gc_ping in previous_pings {
-            if let Err(x) = storage.remove_sent_calendar_ping(&gc_ping) {
+            if let Err(x) = storage.remove_sent_calendar_ping(gc_ping.as_str()) {
                 error!("Failed removing ping {gc_ping:?} from sqlite: {x}");
             }
         }

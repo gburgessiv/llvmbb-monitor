@@ -11,6 +11,7 @@ use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use compact_str::CompactString;
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -139,7 +140,7 @@ struct BuilderInfo {
     #[serde(rename = "builderid")]
     id: BotID,
     name: String,
-    tags: Vec<String>,
+    tags: Vec<CompactString>,
 }
 
 #[derive(Deserialize)]
@@ -568,7 +569,7 @@ fn determine_bot_category(bot_info: &BuilderInfo) -> Option<&str> {
 
     // If there's precisely one tag though, we have a clear winner.
     if bot_info.tags.len() == 1 {
-        return Some(&bot_info.tags[0]);
+        return Some(bot_info.tags[0].as_str());
     }
 
     // Some bots have a `toolchain` tag on them, and their names are otherwise not possible to
@@ -1052,7 +1053,7 @@ mod test {
         BuilderInfo {
             id: 0,
             name: name.to_string(),
-            tags: tags.iter().map(|s| s.to_string()).collect(),
+            tags: tags.iter().map(|s| (*s).into()).collect(),
         }
     }
 

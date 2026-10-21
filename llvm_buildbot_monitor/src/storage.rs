@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use compact_str::CompactString;
 use rusqlite::params;
 use serenity::model::prelude::UserId;
 
@@ -152,13 +153,13 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) fn load_all_sent_calendar_pings(&self) -> Result<Vec<String>> {
+    pub(crate) fn load_all_sent_calendar_pings(&self) -> Result<Vec<CompactString>> {
         let mut stmt = self
             .conn
             .prepare("SELECT event_id FROM sent_calendar_pings")?;
         let iter = stmt.query_map(params![], |row| {
             let val: String = row.get(0)?;
-            Ok(val)
+            Ok(CompactString::new(val))
         })?;
 
         let mut result = Vec::new();

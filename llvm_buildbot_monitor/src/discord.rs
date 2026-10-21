@@ -313,19 +313,22 @@ fn build_community_event_announce_message(
 }
 
 impl ChannelEventBroadcaster {
-    async fn fetch_channels(&self, http: &Http) -> Result<HashMap<String, ChannelId>> {
+    async fn fetch_channels(&self, http: &Http) -> Result<HashMap<CompactString, ChannelId>> {
         let channels = http
             .get_channels(self.guild_id)
             .await
             .context("getting guild channels")?;
-        Ok(channels.into_iter().map(|x| (x.name, x.id)).collect())
+        Ok(channels
+            .into_iter()
+            .map(|x| (CompactString::new(x.name), x.id))
+            .collect())
     }
 
     async fn lookup_channel_ids(
         &self,
         http: &Http,
         broadcast_title: &str,
-        channel_cache: &mut HashMap<String, ChannelId>,
+        channel_cache: &mut HashMap<CompactString, ChannelId>,
         last_cache_update: &mut Instant,
         channel_names: impl Iterator<Item = &str>,
     ) -> Vec<ChannelId> {
