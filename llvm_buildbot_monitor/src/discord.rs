@@ -571,7 +571,7 @@ impl BlamelistCache {
 
         let to_blame = user_ids
             .into_iter()
-            .map(|x| format!("<@{x}>"))
+            .map(|x| format_compact!("<@{x}>"))
             .chain(emails.into_iter().map(discord_safe_email));
 
         *target += " (blamelist: ";
@@ -938,10 +938,8 @@ fn remove_zero_width_spaces(x: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-fn discord_safe_email(email: &Email) -> String {
-    let mut s = String::new();
-    append_discord_safe_email(&mut s, email);
-    s
+fn discord_safe_email(email: &Email) -> CompactString {
+    format_compact!("{}@\u{200B}{}", email.account_with_plus(), email.domain())
 }
 
 impl MessageHandler {
@@ -1352,23 +1350,23 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
     result
 }
 
-fn duration_to_shorthand(dur: chrono::Duration) -> String {
+fn duration_to_shorthand(dur: chrono::Duration) -> CompactString {
     if dur < chrono::Duration::seconds(60) {
         return "<1 minute".into();
     }
     if dur < chrono::Duration::minutes(60) {
         let m = dur.num_minutes();
-        return format!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
+        return format_compact!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
     }
     if dur < chrono::Duration::days(1) {
         let h = dur.num_hours();
-        return format!("{} {}", h, if h == 1 { "hour" } else { "hours" });
+        return format_compact!("{} {}", h, if h == 1 { "hour" } else { "hours" });
     }
     if dur < chrono::Duration::days(28) {
         let d = dur.num_days();
-        return format!("{} {}", d, if d == 1 { "day" } else { "days" });
+        return format_compact!("{} {}", d, if d == 1 { "day" } else { "days" });
     }
-    format!("{} weeks", dur.num_weeks())
+    format_compact!("{} weeks", dur.num_weeks())
 }
 
 // Eh.
