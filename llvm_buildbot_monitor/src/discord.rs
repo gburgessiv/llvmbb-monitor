@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use calendar_check::CommunityEvent;
+use compact_str::{CompactString, format_compact};
 use log::{error, info, warn};
 use serenity::async_trait;
 use serenity::builder;
@@ -269,7 +270,7 @@ fn build_community_event_announce_message(
     let mut resolved_ids = Vec::new();
     let mut unresolved_names = Vec::new();
     for username in mention_user_names {
-        let username = username.as_ref();
+        let username = username.as_str();
         if let Some(&user_id) = resolved_users.get(username) {
             resolved_ids.push(user_id);
         } else {
@@ -284,18 +285,14 @@ fn build_community_event_announce_message(
 
     // Append unresolved usernames as `@user` even though that won't tag them,
     // as the desired effect is signalling that they couldn't be looked up clearly.
-    let all_mentions = resolved_ids
-        .into_iter()
-        .map(|id| format!("<@{id}>"))
-        .chain(unresolved_names.into_iter().map(|name| format!("@{name}")));
-
-    for (i, mention) in all_mentions.enumerate() {
-        if i == 0 {
-            result += " /cc ";
-        } else {
-            result += ", ";
-        }
-        result += &mention;
+    let mut prefix = " /cc ";
+    for id in resolved_ids {
+        write!(&mut result, "{prefix}<@{id}>").unwrap();
+        prefix = ", ";
+    }
+    for name in unresolved_names {
+        write!(&mut result, "{prefix}@{name}").unwrap();
+        prefix = ", ";
     }
     return result;
 
@@ -308,19 +305,22 @@ fn build_community_event_announce_message(
 }
 
 impl ChannelEventBroadcaster {
-    async fn fetch_channels(&self, http: &Http) -> Result<HashMap<String, ChannelId>> {
+    async fn fetch_channels(&self, http: &Http) -> Result<HashMap<CompactString, ChannelId>> {
         let channels = http
             .get_channels(self.guild_id)
             .await
             .context("getting guild channels")?;
-        Ok(channels.into_iter().map(|x| (x.name, x.id)).collect())
+        Ok(channels
+            .into_iter()
+            .map(|x| (x.name.into(), x.id))
+            .collect())
     }
 
     async fn lookup_channel_ids(
         &self,
         http: &Http,
         broadcast_title: &str,
-        channel_cache: &mut HashMap<String, ChannelId>,
+        channel_cache: &mut HashMap<CompactString, ChannelId>,
         last_cache_update: &mut Instant,
         channel_names: impl Iterator<Item = &str>,
     ) -> Vec<ChannelId> {
@@ -428,7 +428,7 @@ impl ChannelEventBroadcaster {
                 .description_data
                 .mention_channels
                 .iter()
-                .map(|x| x.as_ref())
+                .map(CompactString::as_str)
                 .chain(implicit_office_hours_channel);
             let channel_ids = self
                 .lookup_channel_ids(
@@ -461,7 +461,7 @@ impl ChannelEventBroadcaster {
                         .description_data
                         .mention_users
                         .iter()
-                        .map(|x| x.as_ref()),
+                        .map(CompactString::as_str),
                 )
                 .await;
 
@@ -564,17 +564,21 @@ impl BlamelistCache {
         let mut user_ids: Vec<_> = user_ids.into_iter().collect();
         user_ids.sort_unstable();
 
-        let to_blame = user_ids
-            .into_iter()
-            .map(|x| format!("<@{x}>"))
-            .chain(emails.into_iter().map(discord_safe_email));
-
         *target += " (blamelist: ";
-        for (i, p) in to_blame.enumerate() {
-            if i != 0 {
+        let mut first = true;
+        for uid in user_ids {
+            if !first {
                 *target += ", ";
             }
-            *target += &p;
+            first = false;
+            write!(target, "<@{uid}>").unwrap();
+        }
+        for email in emails {
+            if !first {
+                *target += ", ";
+            }
+            first = false;
+            append_discord_safe_email(target, email);
         }
         if blamelist.ignored_noreply_count != 0 {
             write!(target, ", and {} others", blamelist.ignored_noreply_count).unwrap();
@@ -605,9 +609,8 @@ fn find_exact_username_match(
 async fn resolve_username_to_user_id(
     http: &Http,
     guild_id: GuildId,
-    raw_username: &str,
+    clean_name: &str,
 ) -> Result<Option<UserId>> {
-    let clean_name = sanitize_username_query(raw_username);
     if clean_name.is_empty() {
         return Ok(None);
     }
@@ -622,7 +625,7 @@ async fn resolve_username_to_user_id(
 
 struct MemberResolver {
     guild_id: GuildId,
-    cache: HashMap<String, UserId>,
+    cache: HashMap<CompactString, Option<UserId>>,
 }
 
 impl MemberResolver {
@@ -634,20 +637,26 @@ impl MemberResolver {
     }
 
     async fn get_or_resolve(&mut self, http: &Http, raw_username: &str) -> Result<Option<UserId>> {
-        let normalized = sanitize_username_query(raw_username).to_lowercase();
-        if normalized.is_empty() {
+        let clean = sanitize_username_query(raw_username);
+        if clean.is_empty() {
             return Ok(None);
         }
 
-        if let Some(&user_id) = self.cache.get(&normalized) {
-            return Ok(Some(user_id));
+        if !clean.bytes().any(|b| b.is_ascii_uppercase())
+            && let Some(&cached) = self.cache.get(clean)
+        {
+            return Ok(cached);
+        }
+
+        let mut normalized = CompactString::new(clean);
+        normalized.make_ascii_lowercase();
+
+        if let Some(&cached) = self.cache.get(&normalized) {
+            return Ok(cached);
         }
 
         let resolved = resolve_username_to_user_id(http, self.guild_id, &normalized).await?;
-        if let Some(user_id) = resolved {
-            self.cache.insert(normalized, user_id);
-        }
-
+        self.cache.insert(normalized, resolved);
         Ok(resolved)
     }
 }
@@ -724,10 +733,11 @@ impl ChannelServer {
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
 
-            let (bot_category, bot_name) = match &next_breakage.bot_id {
-                BotID::GreenDragon { name } => ("GreenDragon", name.as_str()),
-                BotID::Lab { name, .. } => ("Lab", name.as_str()),
+            let bot_category = match &next_breakage.bot_id {
+                BotID::GreenDragon { .. } => "GreenDragon",
+                BotID::Lab { .. } => "Lab",
             };
+            let bot_name = next_breakage.bot_id.name();
 
             write!(
                 current_message,
@@ -931,12 +941,6 @@ fn remove_zero_width_spaces(x: &str) -> Cow<'_, str> {
 
     let result = x.replace(space, "");
     Cow::Owned(result)
-}
-
-fn discord_safe_email(email: &Email) -> String {
-    let mut s = String::new();
-    append_discord_safe_email(&mut s, email);
-    s
 }
 
 impl MessageHandler {
@@ -1347,23 +1351,21 @@ fn split_message(message: String, size_limit: usize) -> Vec<String> {
     result
 }
 
-fn duration_to_shorthand(dur: chrono::Duration) -> String {
+fn duration_to_shorthand(dur: chrono::Duration) -> CompactString {
     if dur < chrono::Duration::seconds(60) {
         return "<1 minute".into();
     }
-    if dur < chrono::Duration::minutes(60) {
-        let m = dur.num_minutes();
-        return format!("{} {}", m, if m == 1 { "minute" } else { "minutes" });
-    }
-    if dur < chrono::Duration::days(1) {
-        let h = dur.num_hours();
-        return format!("{} {}", h, if h == 1 { "hour" } else { "hours" });
-    }
-    if dur < chrono::Duration::days(28) {
-        let d = dur.num_days();
-        return format!("{} {}", d, if d == 1 { "day" } else { "days" });
-    }
-    format!("{} weeks", dur.num_weeks())
+    let (count, unit) = if dur < chrono::Duration::minutes(60) {
+        (dur.num_minutes(), "minute")
+    } else if dur < chrono::Duration::days(1) {
+        (dur.num_hours(), "hour")
+    } else if dur < chrono::Duration::days(28) {
+        (dur.num_days(), "day")
+    } else {
+        (dur.num_weeks(), "week")
+    };
+    let suffix = if count == 1 { "" } else { "s" };
+    format_compact!("{count} {unit}{suffix}")
 }
 
 // Eh.

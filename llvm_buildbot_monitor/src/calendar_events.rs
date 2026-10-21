@@ -4,6 +4,7 @@ use std::{collections::HashSet, time::Duration};
 use anyhow::{Context, Result};
 use calendar_check::CommunityEvent;
 use chrono::{DateTime, Utc};
+use compact_str::CompactString;
 use log::{error, info, warn};
 use tokio::sync::{broadcast, watch};
 
@@ -76,9 +77,9 @@ fn calculate_ping_time(event: &CommunityEvent) -> DateTime<Utc> {
 fn load_and_gc_previous_calendar_pings(
     storage: &Mutex<Storage>,
     state: &State,
-) -> HashSet<Box<str>> {
+) -> HashSet<CompactString> {
     let mut previous_pings = match storage.lock().unwrap().load_all_sent_calendar_pings() {
-        Ok(p) => p.into_iter().collect::<HashSet<String>>(),
+        Ok(p) => p.into_iter().collect::<HashSet<_>>(),
         Err(x) => {
             error!("Error loading previous calendar pings; starting fresh: {x}");
             return Default::default();
@@ -87,8 +88,8 @@ fn load_and_gc_previous_calendar_pings(
 
     let mut result = HashSet::new();
     for event in &state.events {
-        if let Some(s) = previous_pings.take(event.id.as_ref()) {
-            result.insert(s.into());
+        if let Some(s) = previous_pings.take(&event.id) {
+            result.insert(s);
         }
     }
 
@@ -138,7 +139,7 @@ fn run_discord_pings(
     // complete soon enough anyway.
     std::mem::drop(tokio::task::spawn_blocking(move || {
         for i in successful_pings {
-            let id = state.events[i].id.as_ref();
+            let id = &state.events[i].id;
             if let Err(x) = storage.lock().unwrap().add_sent_calendar_ping(id) {
                 error!("Failed adding sent calendar ping to storage: {x}");
             }
@@ -149,7 +150,7 @@ fn run_discord_pings(
 fn calculate_event_ping_data(
     state: &State,
     now: &DateTime<Utc>,
-    already_pinged: &HashSet<Box<str>>,
+    already_pinged: &HashSet<CompactString>,
 ) -> (Vec<usize>, Option<DateTime<Utc>>) {
     let pingable = state
         .events
@@ -309,7 +310,7 @@ mod test {
         DateTime::from_timestamp(1736002375, 0).unwrap()
     }
 
-    fn to_already_pinged_set(s: &[&str]) -> HashSet<Box<str>> {
+    fn to_already_pinged_set(s: &[&str]) -> HashSet<CompactString> {
         s.iter().map(|x| (*x).into()).collect()
     }
 
