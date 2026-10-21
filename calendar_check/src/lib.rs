@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use compact_str::CompactString;
 use log::{debug, info, warn};
 use serde::Deserialize;
 use serde::de::Deserializer;
@@ -26,11 +27,11 @@ pub struct CommunityEventDescriptionData {
     /// Type of the event, as specified by the user.
     pub event_type: CommunityEventType,
     /// List of users, without a leading '@'.
-    pub mention_users: Vec<Box<str>>,
+    pub mention_users: Vec<CompactString>,
     /// List of channels, without a leading '#'.
-    pub mention_channels: Vec<Box<str>>,
+    pub mention_channels: Vec<CompactString>,
     /// Extra message to include in event pings.
-    pub extra_message: Option<Box<str>>,
+    pub extra_message: Option<CompactString>,
     /// Number of minutes before the start time for a ping.
     pub ping_duration_before_start_mins: u32,
 }
@@ -40,8 +41,8 @@ pub struct CommunityEvent {
     // Unix millis.
     pub start_time: UtcTime,
     pub end_time: UtcTime,
-    pub title: Box<str>,
-    pub id: Box<str>,
+    pub title: CompactString,
+    pub id: CompactString,
     pub event_link: Box<str>,
     pub description_data: CommunityEventDescriptionData,
 }

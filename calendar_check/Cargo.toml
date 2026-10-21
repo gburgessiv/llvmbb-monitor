@@ -13,6 +13,7 @@ workspace = true
 anyhow = "1.0.95"
 chrono = "0.4.39"
 clap = { version = "4.5.23", features = ["derive"] }
+compact_str = { version = "0.10", features = ["serde"] }
 html2text = "0.17"
 log = "0.4.22"
 reqwest = { version = "0.13", features = ["query"] }

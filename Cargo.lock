@@ -186,6 +186,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "compact_str",
  "html2text",
  "log",
  "reqwest",

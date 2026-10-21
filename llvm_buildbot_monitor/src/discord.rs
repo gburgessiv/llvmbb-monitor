@@ -270,7 +270,7 @@ fn build_community_event_announce_message(
     let mut resolved_ids = Vec::new();
     let mut unresolved_names = Vec::new();
     for username in mention_user_names {
-        let username = username.as_ref();
+        let username = username.as_str();
         if let Some(&user_id) = resolved_users.get(username) {
             resolved_ids.push(user_id);
         } else {
@@ -433,7 +433,7 @@ impl ChannelEventBroadcaster {
                 .description_data
                 .mention_channels
                 .iter()
-                .map(|x| x.as_ref())
+                .map(|x| x.as_str())
                 .chain(implicit_office_hours_channel);
             let channel_ids = self
                 .lookup_channel_ids(
@@ -466,7 +466,7 @@ impl ChannelEventBroadcaster {
                         .description_data
                         .mention_users
                         .iter()
-                        .map(|x| x.as_ref()),
+                        .map(|x| x.as_str()),
                 )
                 .await;
 
