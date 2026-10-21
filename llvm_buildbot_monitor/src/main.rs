@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use compact_str::CompactString;
 use log::{LevelFilter, error, info, warn};
 use tokio::sync::watch;
 
@@ -30,7 +31,7 @@ enum BuildbotResult {
 
 #[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone, Debug)]
 struct Email {
-    address: Box<str>,
+    address: CompactString,
     at_loc: usize,
 }
 
@@ -38,7 +39,7 @@ impl Email {
     fn parse(from: &str) -> Option<Email> {
         from.find('@').map(|x| Email {
             // FIXME: to_lowercase here is a bit of a hack.
-            address: from.to_lowercase().into_boxed_str(),
+            address: from.to_lowercase().into(),
             at_loc: x,
         })
     }
@@ -60,7 +61,7 @@ impl Email {
         let address = format!("{account}@{domain}");
         let at_loc = account.len();
         Email {
-            address: address.into_boxed_str(),
+            address: address.into(),
             at_loc,
         }
     }
@@ -84,7 +85,7 @@ impl From<Vec<Email>> for Blamelist {
         let original_len = emails.len();
         let filtered_emails: Vec<Email> = emails
             .into_iter()
-            .filter(|e| e.address.as_ref() != "noreply@github.com")
+            .filter(|e| e.address.as_str() != "noreply@github.com")
             .collect();
         let ignored_noreply_count = original_len - filtered_emails.len();
 
@@ -153,15 +154,15 @@ struct BotStatus {
 
 #[derive(Clone, Debug)]
 struct Bot {
-    category: String,
+    category: CompactString,
     status: BotStatus,
     url: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
 enum BotID {
-    Lab { id: lab::BotID, name: String },
-    GreenDragon { name: String },
+    Lab { id: lab::BotID, name: CompactString },
+    GreenDragon { name: CompactString },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -236,16 +237,19 @@ async fn publish_forever(
                 (
                     BotID::Lab {
                         id: *id,
-                        name: name.clone(),
+                        name: name.as_str().into(),
                     },
                     bot.clone(),
                 )
             })
-            .chain(
-                last_greendragon_snapshot
-                    .iter()
-                    .map(|(name, bot)| (BotID::GreenDragon { name: name.clone() }, bot.clone())),
-            )
+            .chain(last_greendragon_snapshot.iter().map(|(name, bot)| {
+                (
+                    BotID::GreenDragon {
+                        name: name.as_str().into(),
+                    },
+                    bot.clone(),
+                )
+            }))
             .collect();
 
         let elapsed_time = start_time.elapsed();

@@ -270,7 +270,7 @@ async fn fetch_single_bot_status_snapshot(
     Ok(Some(Bot {
         // FIXME: GreenDragon has categories and quite a few bots. Maybe use their
         // categories, too?
-        category: "GreenDragon".to_owned(),
+        category: "GreenDragon".into(),
         url: job_url.to_string(),
         status: BotStatus {
             first_failing_build,
