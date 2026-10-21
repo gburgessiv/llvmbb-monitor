@@ -379,9 +379,9 @@ impl ChannelEventBroadcaster {
     async fn lookup_user_ids<'a>(
         &mut self,
         http: &Http,
-        user_names: impl Iterator<Item = &'a str>,
+        user_names: impl ExactSizeIterator<Item = &'a str>,
     ) -> HashMap<&'a str, UserId> {
-        let mut user_ids = HashMap::new();
+        let mut user_ids = HashMap::with_capacity(user_names.len());
         for target_name in user_names {
             match self.member_resolver.get_or_resolve(http, target_name).await {
                 Ok(Some(user_id)) => {
