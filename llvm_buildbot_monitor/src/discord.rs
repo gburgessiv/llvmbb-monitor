@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use calendar_check::CommunityEvent;
-use futures::StreamExt;
 use log::{error, info, warn};
 use serenity::async_trait;
 use serenity::builder;
@@ -224,13 +223,13 @@ struct GuildServerState {
 
 struct ChannelEventBroadcaster {
     guild_id: GuildId,
-    guild_member_cache: Arc<GuildMemberCache>,
+    member_resolver: MemberResolver,
     event_reader: broadcast::Receiver<CommunityEvent>,
 }
 
 fn build_community_event_announce_message(
     event: &CommunityEvent,
-    guild_members: &[GuildUserInfo],
+    resolved_users: &HashMap<&str, UserId>,
 ) -> String {
     // The URL is generally pretty long, so just start with a 128b buffer.
     let mut result = String::with_capacity(128);
@@ -267,39 +266,36 @@ fn build_community_event_announce_message(
         return result;
     }
 
-    let users_to_mention: Vec<_> = {
-        let mut yet_to_mention = mention_user_names
-            .iter()
-            .map(|x| x.as_ref())
-            .collect::<HashSet<&str>>();
-        let mut mentionable = Vec::new();
-        for member in guild_members {
-            if !yet_to_mention.remove(member.username.as_ref()) {
-                continue;
-            }
-            mentionable.push((member.user_id, member.nickname_or_default()));
-
-            if yet_to_mention.is_empty() {
-                break;
-            }
+    let mut resolved_ids = Vec::new();
+    let mut unresolved_names = Vec::new();
+    for username in mention_user_names {
+        let username = username.as_ref();
+        if let Some(&user_id) = resolved_users.get(username) {
+            resolved_ids.push(user_id);
+        } else {
+            unresolved_names.push(username);
         }
+    }
 
-        if !yet_to_mention.is_empty() {
-            warn!("Failed to find user(s) in event: {yet_to_mention:?}; ignoring");
-        }
+    resolved_ids.sort_unstable();
+    resolved_ids.dedup();
+    unresolved_names.sort_unstable();
+    unresolved_names.dedup();
 
-        // Mention everyone in sorted order by nickname (falling back to username)
-        mentionable.sort_unstable_by_key(|x| x.1);
-        mentionable
-    };
+    // Append unresolved usernames as `@user` even though that won't tag them,
+    // as the desired effect is signalling that they couldn't be looked up clearly.
+    let all_mentions = resolved_ids
+        .into_iter()
+        .map(|id| format!("<@{id}>"))
+        .chain(unresolved_names.into_iter().map(|name| format!("@{name}")));
 
-    for (i, (user_id, _)) in users_to_mention.into_iter().enumerate() {
+    for (i, mention) in all_mentions.enumerate() {
         if i == 0 {
             result += " /cc ";
         } else {
             result += ", ";
         }
-        write!(&mut result, "<@{user_id}>").unwrap();
+        result += &mention;
     }
     return result;
 
@@ -313,7 +309,6 @@ fn build_community_event_announce_message(
 
 impl ChannelEventBroadcaster {
     async fn fetch_channels(&self, http: &Http) -> Result<HashMap<String, ChannelId>> {
-        use anyhow::Context;
         let channels = http
             .get_channels(self.guild_id)
             .await
@@ -381,6 +376,35 @@ impl ChannelEventBroadcaster {
         channel_ids
     }
 
+    async fn lookup_user_ids<'a>(
+        &mut self,
+        http: &Http,
+        user_names: impl ExactSizeIterator<Item = &'a str>,
+    ) -> HashMap<&'a str, UserId> {
+        let mut user_ids = HashMap::with_capacity(user_names.len());
+        for target_name in user_names {
+            match self.member_resolver.get_or_resolve(http, target_name).await {
+                Ok(Some(user_id)) => {
+                    user_ids.insert(target_name, user_id);
+                }
+                Ok(None) => {
+                    warn!(
+                        "User {target_name:?} could not be found in guild {}",
+                        self.guild_id
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to query member {target_name:?} in guild {}: {err:?}",
+                        self.guild_id
+                    );
+                }
+            }
+        }
+
+        user_ids
+    }
+
     async fn serve<F>(&mut self, http: &Http, mut should_exit: F) -> Result<()>
     where
         F: FnMut() -> bool,
@@ -430,23 +454,19 @@ impl ChannelEventBroadcaster {
                 channel_ids.len(),
             );
 
-            let current_users_storage;
-            let current_users = match self.guild_member_cache.fetch_members(http).await {
-                Ok(x) => {
-                    current_users_storage = x;
-                    current_users_storage.as_slice()
-                }
-                Err(x) => {
-                    // Failing to /cc users isn't ... world-ending. Just live with it.
-                    error!(
-                        "Failed getting users cache for event; skipping username resolution: {x}"
-                    );
-                    &[]
-                }
-            };
+            let users_to_mention = self
+                .lookup_user_ids(
+                    http,
+                    next_broadcast
+                        .description_data
+                        .mention_users
+                        .iter()
+                        .map(|x| x.as_ref()),
+                )
+                .await;
 
             let message_chunks = split_message(
-                build_community_event_announce_message(&next_broadcast, current_users),
+                build_community_event_announce_message(&next_broadcast, &users_to_mention),
                 DISCORD_MESSAGE_SIZE_LIMIT,
             );
             for (i, channel_id) in channel_ids.into_iter().enumerate() {
@@ -564,75 +584,71 @@ impl BlamelistCache {
     }
 }
 
-struct GuildUserInfo {
-    user_id: UserId,
-    nickname: Option<Box<str>>,
-    username: Box<str>,
+fn sanitize_username_query(raw_username: &str) -> &str {
+    raw_username.trim().trim_start_matches('@')
 }
 
-impl GuildUserInfo {
-    fn nickname_or_default(&self) -> &str {
-        self.nickname.as_deref().unwrap_or(self.username.as_ref())
-    }
+fn find_exact_username_match(
+    candidates: impl IntoIterator<Item = Member>,
+    clean_name: &str,
+) -> Option<UserId> {
+    candidates.into_iter().find_map(|member| {
+        if member.user.name.eq_ignore_ascii_case(clean_name) {
+            Some(member.user.id)
+        } else {
+            None
+        }
+    })
 }
 
-struct GuildMemberCache {
+/// Resolves a single username to a UserId within a guild without requiring privileged intents.
+async fn resolve_username_to_user_id(
+    http: &Http,
     guild_id: GuildId,
-    cached: tokio::sync::Mutex<Option<(Instant, Arc<Vec<GuildUserInfo>>)>>,
+    raw_username: &str,
+) -> Result<Option<UserId>> {
+    let clean_name = sanitize_username_query(raw_username);
+    if clean_name.is_empty() {
+        return Ok(None);
+    }
+
+    let candidates: Vec<Member> = guild_id
+        .search_members(http, clean_name, Some(10))
+        .await
+        .with_context(|| format!("searching for member {clean_name:?} in guild {guild_id}"))?;
+
+    Ok(find_exact_username_match(candidates, clean_name))
 }
 
-impl GuildMemberCache {
+struct MemberResolver {
+    guild_id: GuildId,
+    cache: HashMap<String, UserId>,
+}
+
+impl MemberResolver {
     fn new(guild_id: GuildId) -> Self {
         Self {
             guild_id,
-            cached: Default::default(),
+            cache: HashMap::new(),
         }
     }
 
-    async fn fetch_members(&self, http: &Http) -> Result<Arc<Vec<GuildUserInfo>>> {
-        let mut cache = self.cached.lock().await;
-        let now = Instant::now();
-        if let Some((last_refresh_attempt, val)) = cache.as_mut() {
-            // Arbitrarily check for new members every hour or so.
-            if now.duration_since(*last_refresh_attempt) > Duration::from_secs(60 * 60) {
-                match Self::fetch_members_bypassing_cache(self.guild_id, http).await {
-                    Ok(x) => {
-                        *last_refresh_attempt = now;
-                        *val = Arc::new(x);
-                    }
-                    Err(x) => {
-                        *last_refresh_attempt = now;
-                        // If something failed, just log it and keep the old value around.
-                        error!(
-                            "Failed updating member cache for guild {}: {x}",
-                            self.guild_id
-                        );
-                    }
-                }
-            }
-            return Ok(val.clone());
+    async fn get_or_resolve(&mut self, http: &Http, raw_username: &str) -> Result<Option<UserId>> {
+        let normalized = sanitize_username_query(raw_username).to_lowercase();
+        if normalized.is_empty() {
+            return Ok(None);
         }
 
-        let result = Arc::new(Self::fetch_members_bypassing_cache(self.guild_id, http).await?);
-        *cache = Some((now, result.clone()));
-        Ok(result)
-    }
-
-    async fn fetch_members_bypassing_cache(
-        guild_id: GuildId,
-        http: &Http,
-    ) -> Result<Vec<GuildUserInfo>> {
-        let mut result: Vec<GuildUserInfo> = Vec::new();
-        let mut members_iter = guild_id.members_iter(http).boxed();
-        while let Some(member) = members_iter.next().await {
-            let member = member?;
-            result.push(GuildUserInfo {
-                user_id: member.user.id,
-                nickname: member.nick.map(Into::into),
-                username: member.user.name.into(),
-            })
+        if let Some(&user_id) = self.cache.get(&normalized) {
+            return Ok(Some(user_id));
         }
-        Ok(result)
+
+        let resolved = resolve_username_to_user_id(http, self.guild_id, &normalized).await?;
+        if let Some(user_id) = resolved {
+            self.cache.insert(normalized, user_id);
+        }
+
+        Ok(resolved)
     }
 }
 
@@ -1098,12 +1114,10 @@ impl serenity::client::EventHandler for MessageHandler {
             })
         };
 
-        let guild_member_cache = Arc::new(GuildMemberCache::new(guild_id));
         let bot_user_id = ctx.cache.current_user().id;
         let http = ctx.http;
         // Spawn the calendar event broadcaster.
         {
-            let guild_member_cache = guild_member_cache.clone();
             let should_exit = should_exit.clone();
             let http = http.clone();
             let event_reader = self.community_event_sender.subscribe();
@@ -1112,7 +1126,7 @@ impl serenity::client::EventHandler for MessageHandler {
             tokio::spawn(async move {
                 let mut broadcaster = ChannelEventBroadcaster {
                     guild_id,
-                    guild_member_cache,
+                    member_resolver: MemberResolver::new(guild_id),
                     event_reader,
                 };
                 loop {
@@ -1806,7 +1820,7 @@ mod test {
                 event_link: "http://link".into(),
                 ..Default::default()
             },
-            /*guild_members=*/ &[],
+            /*resolved_users=*/ &HashMap::new(),
         );
         assert_eq!(
             msg,
@@ -1816,19 +1830,11 @@ mod test {
             )
         );
 
-        let guild_members = [
-            GuildUserInfo {
-                user_id: UserId::new(1234),
-                nickname: None,
-                username: "bar".into(),
-            },
-            GuildUserInfo {
-                user_id: UserId::new(4321),
-                nickname: None,
-                username: "foo".into(),
-            },
+        let resolved_users = HashMap::from([
+            ("bar", UserId::new(1234)),
+            ("foo", UserId::new(4321)),
             // Don't have a mapping for 'baz', so the fallback for that can be tested.
-        ];
+        ]);
         let msg = build_community_event_announce_message(
             &CommunityEvent {
                 start_time: DateTime::from_timestamp(1234, 1).unwrap(),
@@ -1840,14 +1846,14 @@ mod test {
                 },
                 ..Default::default()
             },
-            &guild_members,
+            &resolved_users,
         );
 
         assert_eq!(
             msg,
             concat!(
                 "The `baz!` office hours event is scheduled to start <t:1234:R>! ",
-                "[Click here](<http://link>) for more. /cc <@1234>, <@4321>"
+                "[Click here](<http://link>) for more. /cc <@1234>, <@4321>, @baz"
             )
         );
     }
@@ -1932,7 +1938,7 @@ mod test {
                 },
                 ..Default::default()
             },
-            /*guild_members=*/ &[],
+            /*resolved_users=*/ &HashMap::new(),
         );
         assert_eq!(
             msg,
@@ -1941,5 +1947,38 @@ mod test {
                 "[Click here](<http://link>) for more. Extra info: `'foo!`."
             )
         );
+    }
+
+    #[test]
+    fn test_sanitize_username_query() {
+        assert_eq!(sanitize_username_query("alice"), "alice");
+        assert_eq!(sanitize_username_query("@alice"), "alice");
+        assert_eq!(sanitize_username_query("  @@alice  "), "alice");
+        assert_eq!(sanitize_username_query("   @   "), "");
+        assert_eq!(sanitize_username_query("@"), "");
+        assert_eq!(sanitize_username_query("   "), "");
+    }
+
+    #[test]
+    fn test_find_exact_username_match() {
+        let make_member = |id: u64, username: &str, nick: Option<&str>| -> Member {
+            let mut m = Member::default();
+            m.user.id = UserId::new(id);
+            m.user.name = username.to_owned();
+            m.nick = nick.map(ToOwned::to_owned);
+            m
+        };
+
+        let candidates = vec![
+            make_member(1, "alexander", None),
+            make_member(2, "other_user", Some("alex")),
+            make_member(3, "Alex", None),
+        ];
+
+        assert_eq!(
+            find_exact_username_match(candidates.clone(), "alex"),
+            Some(UserId::new(3))
+        );
+        assert_eq!(find_exact_username_match(candidates, "unknown"), None);
     }
 }
