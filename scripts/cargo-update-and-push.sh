@@ -8,7 +8,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-git fetch
+git fetch --prune
 branch_name=cargo-update
 
 if [[ "$(git branch -r)" == *"github/${branch_name}"* ]]; then
