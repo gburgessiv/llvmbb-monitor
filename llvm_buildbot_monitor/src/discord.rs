@@ -506,10 +506,58 @@ impl ChannelEventBroadcaster {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BuildbotChannels {
+    status: Option<ChannelId>,
+    updates: Option<ChannelId>,
+}
+
+impl BuildbotChannels {
+    fn from_guild_channels<'a>(
+        guild_id: GuildId,
+        channels: impl IntoIterator<Item = &'a GuildChannel>,
+    ) -> Option<Self> {
+        let mut status = None;
+        let mut updates = None;
+        for ch in channels {
+            if status.is_none() && ch.name == "buildbot-status" {
+                status = Some(ch.id);
+            } else if updates.is_none() && ch.name == "buildbot-updates" {
+                updates = Some(ch.id);
+            }
+        }
+
+        if status.is_none() && updates.is_none() {
+            warn!(
+                "Neither buildbot-status nor buildbot-updates channel in #{guild_id}; skipping bot status serving"
+            );
+            return None;
+        }
+
+        if let Some(id) = status {
+            info!("Identified #{id} as buildbot-status channel in #{guild_id}");
+        } else {
+            warn!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
+        }
+
+        if let Some(id) = updates {
+            info!("Identified #{id} as buildbot-updates channel in #{guild_id}");
+        } else {
+            warn!(
+                "No buildbot-updates channel in #{guild_id}; breakage updates will not be posted"
+            );
+        }
+
+        Some(Self { status, updates })
+    }
+}
+
 struct ChannelServer {
+    guild_id: GuildId,
     bot_user_id: UserId,
-    status_channel: Option<ChannelId>,
-    updates_channel: Option<ChannelId>,
+    // Seeded from `GuildCreate` for the initial `serve` call; `None` thereafter so retries after
+    // errors re-query the guild's current channels.
+    initial_channels: Option<BuildbotChannels>,
 
     ui: Option<Arc<UI>>,
     unsent_breakages: VecDeque<Arc<BotBuild>>,
@@ -683,6 +731,21 @@ impl MemberResolver {
 const MESSAGE_CACHE_SIZE: usize = 5;
 
 impl ChannelServer {
+    async fn resolve_channels(&mut self, http: &Http) -> Result<Option<BuildbotChannels>> {
+        if let Some(channels) = self.initial_channels.take() {
+            return Ok(Some(channels));
+        }
+
+        let channels = http
+            .get_channels(self.guild_id)
+            .await
+            .context("getting guild channels")?;
+        Ok(BuildbotChannels::from_guild_channels(
+            self.guild_id,
+            &channels,
+        ))
+    }
+
     async fn await_next_ui(&mut self, receiver: &mut UIBroadcastReceiver) -> Arc<UI> {
         let (ui, new_breakages) = receiver.next().await;
         self.ui = Some(ui.clone());
@@ -829,8 +892,12 @@ impl ChannelServer {
         Ok(())
     }
 
-    async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
-        let Some(updates_channel) = self.updates_channel else {
+    async fn update_updates_channel(
+        &mut self,
+        http: &Http,
+        updates_channel: Option<ChannelId>,
+    ) -> Result<()> {
+        let Some(updates_channel) = updates_channel else {
             self.unsent_breakages.clear();
             return Ok(());
         };
@@ -922,7 +989,11 @@ impl ChannelServer {
     where
         F: FnMut() -> bool,
     {
-        let mut existing_messages = match self.status_channel {
+        let Some(channels) = self.resolve_channels(http).await? else {
+            return Ok(());
+        };
+
+        let mut existing_messages = match channels.status {
             Some(status_channel) => Some(self.setup_status_channel(http, status_channel).await?),
             None => None,
         };
@@ -930,7 +1001,7 @@ impl ChannelServer {
         let mut current_ui: Arc<UI> = match self.ui.as_ref() {
             None => {
                 if let (Some(status_channel), Some(existing_messages)) =
-                    (self.status_channel, existing_messages.as_mut())
+                    (channels.status, existing_messages.as_mut())
                 {
                     let messages: &[&str] = &[concat!(
                         ":man_construction_worker: one moment -- set-up is in progress... ",
@@ -946,7 +1017,7 @@ impl ChannelServer {
 
         loop {
             if let (Some(status_channel), Some(existing_messages)) =
-                (self.status_channel, existing_messages.as_mut())
+                (channels.status, existing_messages.as_mut())
             {
                 self.update_status_channel(
                     http,
@@ -956,7 +1027,7 @@ impl ChannelServer {
                 )
                 .await?;
             }
-            self.update_updates_channel(http).await?;
+            self.update_updates_channel(http, channels.updates).await?;
 
             if should_exit() {
                 return Ok(());
@@ -1190,44 +1261,20 @@ impl serenity::client::EventHandler for MessageHandler {
         }
 
         // Spawn the buildbot status broadcaster.
-        let find_channel_id = |name: &str| {
-            guild
-                .channels
-                .iter()
-                .find(|(_, x)| x.name == name)
-                .map(|(id, _)| *id)
-        };
-        let status_channel = find_channel_id("buildbot-status");
-        let updates_channel = find_channel_id("buildbot-updates");
-        if status_channel.is_none() && updates_channel.is_none() {
-            warn!(
-                "Neither buildbot-status nor buildbot-updates channel in #{guild_id}; skipping bot status serving"
-            );
+        let Some(initial_channels) =
+            BuildbotChannels::from_guild_channels(guild_id, guild.channels.values())
+        else {
             return;
-        }
-
-        if let Some(id) = status_channel {
-            info!("Identified #{id} as buildbot-status channel in #{guild_id}");
-        } else {
-            warn!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
-        }
-
-        if let Some(id) = updates_channel {
-            info!("Identified #{id} as buildbot-updates channel in #{guild_id}");
-        } else {
-            warn!(
-                "No buildbot-updates channel in #{guild_id}; breakage updates will not be posted"
-            );
-        }
+        };
 
         let bot_user_id = ctx.cache.current_user().id;
         let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
         let storage = self.storage.clone();
         tokio::spawn(async move {
             let mut server = ChannelServer {
+                guild_id,
                 bot_user_id,
-                status_channel,
-                updates_channel,
+                initial_channels: Some(initial_channels),
 
                 ui: None,
                 unsent_breakages: VecDeque::new(),
@@ -1235,8 +1282,11 @@ impl serenity::client::EventHandler for MessageHandler {
             };
             loop {
                 info!("Setting up bot status serving for guild #{guild_id}");
-                if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
-                    error!("Failed serving bot status for guild #{guild_id}: {x:#}");
+                match server.serve(&http, &mut pubsub_reader, &*should_exit).await {
+                    Ok(()) => break,
+                    Err(x) => {
+                        error!("Failed serving bot status for guild #{guild_id}: {x:#}");
+                    }
                 }
 
                 if should_exit() {
@@ -2045,5 +2095,46 @@ mod test {
             Some(UserId::new(3))
         );
         assert_eq!(find_exact_username_match(candidates, "unknown"), None);
+    }
+
+    #[test]
+    fn test_buildbot_channels_from_guild_channels() {
+        let guild_id = GuildId::new(1);
+        let make_channel = |id: u64, name: &str| -> GuildChannel {
+            let mut ch = GuildChannel::default();
+            ch.id = ChannelId::new(id);
+            ch.name = name.to_owned();
+            ch
+        };
+
+        let other = make_channel(10, "general");
+        let status = make_channel(20, "buildbot-status");
+        let updates = make_channel(30, "buildbot-updates");
+
+        assert_eq!(
+            BuildbotChannels::from_guild_channels(guild_id, [&other]),
+            None
+        );
+        assert_eq!(
+            BuildbotChannels::from_guild_channels(guild_id, [&other, &status]),
+            Some(BuildbotChannels {
+                status: Some(ChannelId::new(20)),
+                updates: None,
+            })
+        );
+        assert_eq!(
+            BuildbotChannels::from_guild_channels(guild_id, [&other, &updates]),
+            Some(BuildbotChannels {
+                status: None,
+                updates: Some(ChannelId::new(30)),
+            })
+        );
+        assert_eq!(
+            BuildbotChannels::from_guild_channels(guild_id, [&other, &status, &updates]),
+            Some(BuildbotChannels {
+                status: Some(ChannelId::new(20)),
+                updates: Some(ChannelId::new(30)),
+            })
+        );
     }
 }
