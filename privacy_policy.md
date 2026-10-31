@@ -27,12 +27,13 @@ To perform its core functions, the Bot requires access to specific information a
   * We only process message content to respond to setup commands (such as listing, adding, or removing your email).
   * With the exception of the dedicated status channel (detailed below), the Bot does not read or process message content from public server channels.
 
-### C. Status Channel Messages
-* **Why we need it**: The Bot maintains a dedicated status channel with persistent messages that update automatically. To keep this channel clean, the Bot reads the channel history to find and delete any messages not authored by itself.
-* **What we access**: Message metadata (such as the author ID) of messages posted in the dedicated status channel.
+### C. Status Channel Messages (Optional `#buildbot-status` Channel)
+* **Why we need it**: If configured on a server, the Bot maintains a dedicated status channel (`#buildbot-status`) with persistent messages that update automatically. To keep this channel clean, the Bot reads that channel's history to find and delete any messages not authored by itself. If a server does not configure `#buildbot-status`, the Bot does not read or delete any channel messages.
+* **What we access**: Message metadata (such as the author ID) of messages posted in the optional `#buildbot-status` channel.
 * **How we handle it**:
   * We only process this data to determine if a message was sent by the Bot or by another user.
-  * If a message in the status channel was not sent by the Bot, it is automatically deleted. We do not store or log the content of these deleted messages.
+  * If a message in `#buildbot-status` was not sent by the Bot, it is automatically deleted. We do not store or log the content of these deleted messages.
+  * Messages in `#buildbot-updates` or any other channels are never read or deleted.
 
 
 ---
