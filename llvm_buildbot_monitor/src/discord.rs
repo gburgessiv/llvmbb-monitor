@@ -1150,7 +1150,7 @@ impl serenity::client::EventHandler for MessageHandler {
         if let Some(id) = status_channel {
             info!("Identified #{id} as buildbot-status channel in #{guild_id}");
         } else {
-            info!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
+            warn!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
         }
 
         let updates_channel = find_channel_id("buildbot-updates");
