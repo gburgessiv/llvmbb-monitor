@@ -650,12 +650,7 @@ impl BlamelistCache {
 }
 
 fn sanitize_username_query(raw_username: &str) -> &str {
-    let trimmed = raw_username.trim();
-    if let Some(mention) = trimmed.strip_prefix("<@").and_then(|s| s.strip_suffix('>')) {
-        mention.strip_prefix('!').unwrap_or(mention)
-    } else {
-        trimmed.trim_start_matches('@')
-    }
+    raw_username.trim().trim_start_matches('@')
 }
 
 fn find_exact_username_match(
@@ -671,12 +666,7 @@ fn find_exact_username_match(
     })
 }
 
-const MEMBER_SEARCH_LIMIT: u64 = 250;
-
-/// Resolves a single username to a UserId within a guild without streaming all members over Gateway.
-///
-/// Note: Discord's HTTP REST member search endpoint requires the `Server Members Intent`
-/// (`GUILD_MEMBERS`) to be enabled for the bot application in the Discord Developer Portal.
+/// Resolves a single username to a UserId within a guild without requiring privileged intents.
 async fn resolve_username_to_user_id(
     http: &Http,
     guild_id: GuildId,
@@ -687,7 +677,7 @@ async fn resolve_username_to_user_id(
     }
 
     let candidates: Vec<Member> = guild_id
-        .search_members(http, clean_name, Some(MEMBER_SEARCH_LIMIT))
+        .search_members(http, clean_name, Some(10))
         .await
         .with_context(|| format!("searching for member {clean_name:?} in guild {guild_id}"))?;
 
@@ -1165,176 +1155,6 @@ impl MessageHandler {
             format!("I didn't have {raw_email} on file for you.")
         }
     }
-
-    async fn handle_lookup_user(
-        &self,
-        ctx: &Context,
-        author: &serenity::model::user::User,
-        target_username: Option<&str>,
-    ) -> String {
-        let clean_name = match validate_lookup_user_request(&author.name, target_username) {
-            Ok(name) => name,
-            Err(msg) => return msg.into(),
-        };
-
-        let mut guilds: Vec<GuildId> = self
-            .servers
-            .lock()
-            .unwrap()
-            .server_refcounts
-            .iter()
-            .filter_map(|(&id, &count)| if count > 0 { Some(id) } else { None })
-            .collect();
-
-        for guild_id in ctx.cache.guilds() {
-            if !guilds.contains(&guild_id) {
-                guilds.push(guild_id);
-            }
-        }
-
-        if guilds.is_empty()
-            && let Ok(current_guilds) = ctx.http.get_guilds(None, None).await
-        {
-            guilds = current_guilds.into_iter().map(|g| g.id).collect();
-        }
-
-        if guilds.is_empty() {
-            return "I am not currently connected to any guilds.".into();
-        }
-
-        guilds.sort_unstable();
-
-        let mut responses = Vec::new();
-        for guild_id in guilds {
-            let guild_name = ctx.cache.guild(guild_id).map(|g| g.name.clone());
-            let res = if let Ok(uid_num) = clean_name.parse::<u64>() {
-                let target_uid = UserId::new(uid_num);
-                match guild_id.member(&ctx.http, target_uid).await {
-                    Ok(m) => Ok(vec![m]),
-                    Err(serenity::Error::Http(http_err))
-                        if http_err.status_code() == Some(reqwest::StatusCode::NOT_FOUND) =>
-                    {
-                        Ok(vec![])
-                    }
-                    Err(err) => Err(err).with_context(|| {
-                        format!("querying member {target_uid} in guild {guild_id}")
-                    }),
-                }
-            } else {
-                guild_id
-                    .search_members(&ctx.http, clean_name, Some(MEMBER_SEARCH_LIMIT))
-                    .await
-                    .with_context(|| {
-                        format!("searching for member {clean_name:?} in guild {guild_id}")
-                    })
-            };
-            responses.push(format_guild_lookup_result(
-                guild_id,
-                guild_name.as_deref(),
-                clean_name,
-                res,
-            ));
-        }
-
-        responses.join("\n")
-    }
-}
-
-fn validate_lookup_user_request<'a>(
-    author_name: &str,
-    target_username: Option<&'a str>,
-) -> Result<&'a str, &'static str> {
-    if !author_name.eq_ignore_ascii_case("gburgessiv") {
-        return Err("Sorry, you are not authorized to use this command.");
-    }
-
-    let Some(raw_target) = target_username else {
-        return Err("Usage: lookup-user <username>");
-    };
-
-    let clean_name = sanitize_username_query(raw_target);
-    if clean_name.is_empty() {
-        return Err("Please specify a valid username.");
-    }
-
-    Ok(clean_name)
-}
-
-fn format_guild_lookup_result(
-    guild_id: GuildId,
-    guild_name: Option<&str>,
-    clean_name: &str,
-    result: Result<Vec<Member>>,
-) -> String {
-    let guild_label = match guild_name {
-        Some(name) => format!("Guild {name:?} ({guild_id})"),
-        None => format!("Guild {guild_id}"),
-    };
-
-    match result {
-        Ok(candidates) => {
-            let clean_uid = clean_name.parse::<u64>().ok();
-            let matched_member = candidates.iter().find(|m| {
-                if let Some(uid_num) = clean_uid
-                    && m.user.id.get() == uid_num
-                {
-                    return true;
-                }
-                m.user.name.eq_ignore_ascii_case(clean_name)
-            });
-
-            if let Some(candidate) = matched_member {
-                let mut extra_info = String::new();
-                if let Some(nick) = candidate.nick.as_deref() {
-                    extra_info += &format!(" (nick: {nick:?})");
-                }
-                if let Some(global) = candidate.user.global_name.as_deref() {
-                    extra_info += &format!(" (display: {global:?})");
-                }
-                format!(
-                    "{guild_label}: Found <@{}> (`{}`){extra_info}",
-                    candidate.user.id, candidate.user.name,
-                )
-            } else if candidates.is_empty() {
-                format!("{guild_label}: No users found matching {clean_name:?}")
-            } else {
-                const MAX_DISPLAYED_CANDIDATES: usize = 15;
-                let displayed_candidates: Vec<String> = candidates
-                    .iter()
-                    .take(MAX_DISPLAYED_CANDIDATES)
-                    .map(|m| {
-                        let mut s = format!("`{}`", m.user.name);
-                        if let Some(nick) = &m.nick {
-                            s += &format!(" (nick: {nick:?})");
-                        }
-                        if let Some(global) = &m.user.global_name {
-                            s += &format!(" (display: {global:?})");
-                        }
-                        s
-                    })
-                    .collect();
-
-                let overflow = if candidates.len() > MAX_DISPLAYED_CANDIDATES {
-                    format!(
-                        ", ... and {} more",
-                        candidates.len() - MAX_DISPLAYED_CANDIDATES
-                    )
-                } else {
-                    String::new()
-                };
-
-                format!(
-                    "{guild_label}: No exact match for {clean_name:?}. Returned {} candidate(s): {}{}",
-                    candidates.len(),
-                    displayed_candidates.join(", "),
-                    overflow,
-                )
-            }
-        }
-        Err(err) => {
-            format!("{guild_label}: Error querying members for {clean_name:?}: {err:#}")
-        }
-    }
 }
 
 #[async_trait]
@@ -1521,10 +1341,6 @@ impl serenity::client::EventHandler for MessageHandler {
             Some("add-email") => Some(self.handle_add_email(from_uid, content_fields.next())),
             Some("list-emails") => Some(self.handle_list_emails(from_uid)),
             Some("rm-email") => Some(self.handle_remove_email(from_uid, content_fields.next())),
-            Some("lookup-user" | "lookup_user") => Some(
-                self.handle_lookup_user(&ctx, &message.author, content_fields.next())
-                    .await,
-            ),
             Some(_) | None => {
                 info!("Received a DM-ish message; not sure what to do with it: {content:?}");
                 None
@@ -2256,10 +2072,6 @@ mod test {
         assert_eq!(sanitize_username_query("   @   "), "");
         assert_eq!(sanitize_username_query("@"), "");
         assert_eq!(sanitize_username_query("   "), "");
-        assert_eq!(sanitize_username_query("<@12345>"), "12345");
-        assert_eq!(sanitize_username_query("<@!12345>"), "12345");
-        assert_eq!(sanitize_username_query("  <@!12345>  "), "12345");
-        assert_eq!(sanitize_username_query("<@>"), "");
     }
 
     #[test]
@@ -2323,103 +2135,6 @@ mod test {
                 status: Some(ChannelId::new(20)),
                 updates: Some(ChannelId::new(30)),
             })
-        );
-    }
-
-    #[test]
-    fn test_validate_lookup_user_request() {
-        assert_eq!(
-            validate_lookup_user_request("someone_else", Some("alice")),
-            Err("Sorry, you are not authorized to use this command.")
-        );
-        assert_eq!(
-            validate_lookup_user_request("gburgessiv", None),
-            Err("Usage: lookup-user <username>")
-        );
-        assert_eq!(
-            validate_lookup_user_request("gburgessiv", Some("@")),
-            Err("Please specify a valid username.")
-        );
-        assert_eq!(
-            validate_lookup_user_request("gburgessiv", Some("  @alice  ")),
-            Ok("alice")
-        );
-        assert_eq!(
-            validate_lookup_user_request("gburgessiv", Some("<@12345>")),
-            Ok("12345")
-        );
-        assert_eq!(
-            validate_lookup_user_request("GBurgessIV", Some("bob")),
-            Ok("bob")
-        );
-    }
-
-    #[test]
-    fn test_format_guild_lookup_result() {
-        let guild_id = GuildId::new(42);
-        let make_member =
-            |id: u64, username: &str, nick: Option<&str>, global_name: Option<&str>| -> Member {
-                let mut m = Member::default();
-                m.user.id = UserId::new(id);
-                m.user.name = username.to_owned();
-                m.user.global_name = global_name.map(ToOwned::to_owned);
-                m.nick = nick.map(ToOwned::to_owned);
-                m
-            };
-
-        // Exact match without nick or display, with guild name
-        let candidates = vec![make_member(1, "alice", None, None)];
-        assert_eq!(
-            format_guild_lookup_result(guild_id, Some("LLVM"), "alice", Ok(candidates)),
-            "Guild \"LLVM\" (42): Found <@1> (`alice`)"
-        );
-
-        // Exact match with nick and display, without guild name
-        let candidates = vec![make_member(1, "alice", Some("Alicia"), Some("Alice B"))];
-        assert_eq!(
-            format_guild_lookup_result(guild_id, None, "alice", Ok(candidates)),
-            "Guild 42: Found <@1> (`alice`) (nick: \"Alicia\") (display: \"Alice B\")"
-        );
-
-        // Match by user ID (e.g. from mention)
-        let candidates = vec![make_member(12345, "alice", None, None)];
-        assert_eq!(
-            format_guild_lookup_result(guild_id, Some("LLVM"), "12345", Ok(candidates)),
-            "Guild \"LLVM\" (42): Found <@12345> (`alice`)"
-        );
-
-        // No candidates
-        assert_eq!(
-            format_guild_lookup_result(guild_id, Some("LLVM"), "nobody", Ok(vec![])),
-            "Guild \"LLVM\" (42): No users found matching \"nobody\""
-        );
-
-        // Candidates returned, but no exact match
-        let candidates = vec![
-            make_member(1, "alexander", None, None),
-            make_member(2, "other_user", Some("alex"), Some("Alex O")),
-        ];
-        assert_eq!(
-            format_guild_lookup_result(guild_id, Some("LLVM"), "alex", Ok(candidates)),
-            "Guild \"LLVM\" (42): No exact match for \"alex\". Returned 2 candidate(s): `alexander`, `other_user` (nick: \"alex\") (display: \"Alex O\")"
-        );
-
-        // Truncation when > 15 candidates
-        let many_candidates: Vec<_> = (1..=17)
-            .map(|i| make_member(i, &format!("user_{i}"), None, None))
-            .collect();
-        let formatted =
-            format_guild_lookup_result(guild_id, Some("LLVM"), "user", Ok(many_candidates));
-        assert!(
-            formatted.contains("Returned 17 candidate(s):")
-                && formatted.ends_with(", ... and 2 more")
-        );
-
-        // Error case
-        let err = anyhow::anyhow!("403 Forbidden");
-        assert_eq!(
-            format_guild_lookup_result(guild_id, Some("LLVM"), "alice", Err(err)),
-            "Guild \"LLVM\" (42): Error querying members for \"alice\": 403 Forbidden"
         );
     }
 }
