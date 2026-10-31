@@ -495,8 +495,8 @@ impl ChannelEventBroadcaster {
 
 struct ChannelServer {
     bot_user_id: UserId,
-    status_channel: ChannelId,
-    updates_channel: ChannelId,
+    status_channel: Option<ChannelId>,
+    updates_channel: Option<ChannelId>,
 
     ui: Option<Arc<UI>>,
     unsent_breakages: VecDeque<Arc<BotBuild>>,
@@ -677,9 +677,93 @@ impl ChannelServer {
         ui
     }
 
+    async fn setup_status_channel(
+        &self,
+        http: &Http,
+        status_channel: ChannelId,
+    ) -> Result<Vec<ServerUIMessage>> {
+        info!("Removing existing messages in {status_channel}");
+
+        let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
+        let mut most_recent_id = MessageId::new(1);
+        loop {
+            let max_messages = 50;
+            let messages = status_channel
+                .messages(
+                    http,
+                    builder::GetMessages::new()
+                        .after(most_recent_id)
+                        .limit(max_messages),
+                )
+                .await
+                .context("fetching status messages")?;
+
+            if messages.is_empty() {
+                break;
+            }
+
+            let new_most_recent_id = messages.iter().map(|x| x.id).max().unwrap();
+            debug_assert!(
+                new_most_recent_id > most_recent_id,
+                "{new_most_recent_id} <= {most_recent_id}?"
+            );
+            most_recent_id = new_most_recent_id;
+
+            let mut not_mine: Vec<MessageId> = Vec::new();
+            for message in messages {
+                if message.author.id != self.bot_user_id {
+                    not_mine.push(message.id);
+                    continue;
+                }
+
+                existing_messages.push(ServerUIMessage {
+                    last_value: message.content,
+                    id: message.id,
+                });
+            }
+
+            for message_id in not_mine {
+                // "You can only bulk delete messages that are under 14 days old," so no bulk
+                // delete API for us.
+                status_channel
+                    .delete_message(http, message_id)
+                    .await
+                    .context("deleting non-bot message in status channel")?;
+            }
+        }
+
+        // Mixing new messages + old messages can cause unsightly separators.
+        if existing_messages.len() < MESSAGE_CACHE_SIZE {
+            info!(
+                "{} existing messages in #{status_channel}, which is < {MESSAGE_CACHE_SIZE}; starting with a clean slate",
+                existing_messages.len()
+            );
+            for msg in &existing_messages {
+                // "You can only bulk delete messages that are under 14 days old," so no bulk
+                // delete API for us.
+                status_channel
+                    .delete_message(http, msg.id)
+                    .await
+                    .context("clearing existing status messages")?;
+            }
+            existing_messages.clear();
+        } else {
+            info!(
+                "Reusing up to {} existing messages from status channel #{status_channel}",
+                existing_messages.len()
+            );
+        }
+
+        // Don't assume any order on the message IDs we received (they're generally new -> old per
+        // batch, but we're getting batches in the order oldest -> newest, so ...)
+        existing_messages.sort_unstable_by_key(|x| x.id);
+        Ok(existing_messages)
+    }
+
     async fn update_status_channel<S: Borrow<str>>(
         &self,
         http: &Http,
+        status_channel: ChannelId,
         messages: &[S],
         existing_messages: &mut Vec<ServerUIMessage>,
     ) -> Result<()> {
@@ -698,22 +782,23 @@ impl ChannelServer {
                     continue;
                 }
 
-                self.status_channel
+                status_channel
                     .edit_message(
                         http,
                         prev_data.id,
                         builder::EditMessage::new().content(data),
                     )
-                    .await?;
+                    .await
+                    .context("editing status message")?;
 
                 prev_data.last_value = data.to_owned();
                 continue;
             }
 
-            let discord_message = self
-                .status_channel
+            let discord_message = status_channel
                 .send_message(http, builder::CreateMessage::new().content(data))
-                .await?;
+                .await
+                .context("sending status message")?;
             existing_messages.push(ServerUIMessage {
                 last_value: data.to_owned(),
                 id: discord_message.id,
@@ -723,12 +808,20 @@ impl ChannelServer {
         debug_assert!(num_messages <= existing_messages.len());
         for _ in num_messages..existing_messages.len() {
             let id = existing_messages.pop().unwrap().id;
-            self.status_channel.delete_message(http, id).await?;
+            status_channel
+                .delete_message(http, id)
+                .await
+                .context("deleting extra status message")?;
         }
         Ok(())
     }
 
     async fn update_updates_channel(&mut self, http: &Http) -> Result<()> {
+        let Some(updates_channel) = self.updates_channel else {
+            self.unsent_breakages.clear();
+            return Ok(());
+        };
+
         let mut blamelist_cache = BlamelistCache::default();
         while let Some(next_breakage) = self.unsent_breakages.front() {
             let mut current_message = String::with_capacity(256);
@@ -796,9 +889,10 @@ impl ChannelServer {
                 //
                 // On the bright side, `split_message` shouldn't do that like 99.99% of the time. I
                 // hope. 2K chars is a lot, fam.
-                self.updates_channel
+                updates_channel
                     .send_message(http, builder::CreateMessage::new().content(msg))
-                    .await?;
+                    .await
+                    .context("sending breakage update")?;
             }
 
             self.unsent_breakages.pop_front();
@@ -815,94 +909,40 @@ impl ChannelServer {
     where
         F: FnMut() -> bool,
     {
-        info!("Removing existing messages in {}", self.status_channel);
+        let mut existing_messages = match self.status_channel {
+            Some(status_channel) => Some(self.setup_status_channel(http, status_channel).await?),
+            None => None,
+        };
 
-        let mut existing_messages: Vec<ServerUIMessage> = Vec::new();
-        let mut most_recent_id = MessageId::new(1);
-        loop {
-            let max_messages = 50;
-            let messages = self
-                .status_channel
-                .messages(
-                    http,
-                    builder::GetMessages::new()
-                        .after(most_recent_id)
-                        .limit(max_messages),
-                )
-                .await?;
-
-            if messages.is_empty() {
-                break;
-            }
-
-            let new_most_recent_id = messages.iter().map(|x| x.id).max().unwrap();
-            debug_assert!(
-                new_most_recent_id > most_recent_id,
-                "{new_most_recent_id} <= {most_recent_id}?"
-            );
-            most_recent_id = new_most_recent_id;
-
-            let mut not_mine: Vec<MessageId> = Vec::new();
-            for message in messages {
-                if message.author.id != self.bot_user_id {
-                    not_mine.push(message.id);
-                    continue;
-                }
-
-                existing_messages.push(ServerUIMessage {
-                    last_value: message.content,
-                    id: message.id,
-                });
-            }
-
-            for message_id in not_mine {
-                // "You can only bulk delete messages that are under 14 days old," so no bulk
-                // delete API for us.
-                self.status_channel.delete_message(http, message_id).await?;
-            }
-        }
-
-        // Mixing new messages + old messages can cause unsightly separators.
-        if existing_messages.len() < MESSAGE_CACHE_SIZE {
-            info!(
-                "{} existing messages in #{}, which is < {}; starting with a clean slate",
-                existing_messages.len(),
-                self.status_channel,
-                MESSAGE_CACHE_SIZE
-            );
-            for msg in &existing_messages {
-                // "You can only bulk delete messages that are under 14 days old," so no bulk
-                // delete API for us.
-                self.status_channel.delete_message(http, msg.id).await?;
-            }
-            existing_messages.clear();
-        } else {
-            info!(
-                "Reusing up to {} existing messages from status channel #{}",
-                existing_messages.len(),
-                self.status_channel
-            );
-        }
-
-        // Don't assume any order on the message IDs we received (they're generally new -> old per
-        // batch, but we're getting batches in the order oldest -> newest, so ...)
-        existing_messages.sort_unstable_by_key(|x| x.id);
         let mut current_ui: Arc<UI> = match self.ui.as_ref() {
             None => {
-                let messages: &[&str] = &[concat!(
-                    ":man_construction_worker: one moment -- set-up is in progress... ",
-                    ":woman_construction_worker:"
-                )];
-                self.update_status_channel(http, messages, &mut existing_messages)
-                    .await?;
+                if let (Some(status_channel), Some(existing_messages)) =
+                    (self.status_channel, existing_messages.as_mut())
+                {
+                    let messages: &[&str] = &[concat!(
+                        ":man_construction_worker: one moment -- set-up is in progress... ",
+                        ":woman_construction_worker:"
+                    )];
+                    self.update_status_channel(http, status_channel, messages, existing_messages)
+                        .await?;
+                }
                 self.await_next_ui(ui).await
             }
             Some(x) => x.clone(),
         };
 
         loop {
-            self.update_status_channel(http, &current_ui.messages, &mut existing_messages)
+            if let (Some(status_channel), Some(existing_messages)) =
+                (self.status_channel, existing_messages.as_mut())
+            {
+                self.update_status_channel(
+                    http,
+                    status_channel,
+                    &current_ui.messages,
+                    existing_messages,
+                )
                 .await?;
+            }
             self.update_updates_channel(http).await?;
 
             if should_exit() {
@@ -1060,26 +1100,6 @@ impl serenity::client::EventHandler for MessageHandler {
             }
         }
 
-        let find_channel_id = |name: &str| match guild.channels.iter().find(|(_, x)| x.name == name)
-        {
-            Some((x, _)) => {
-                info!("Identified #{x} as my channel in #{guild_id}");
-                Some(*x)
-            }
-            None => {
-                error!("No {name} channel in #{guild_id}; quit");
-                None
-            }
-        };
-
-        let Some(status_channel) = find_channel_id("buildbot-status") else {
-            return;
-        };
-
-        let Some(updates_channel) = find_channel_id("buildbot-updates") else {
-            return;
-        };
-
         let should_exit = {
             let guild_state = self.servers.clone();
             let responded_with_yes = AtomicBool::new(false);
@@ -1117,6 +1137,30 @@ impl serenity::client::EventHandler for MessageHandler {
                 }
             })
         };
+
+        let find_channel_id = |name: &str| {
+            guild
+                .channels
+                .iter()
+                .find(|(_, x)| x.name == name)
+                .map(|(id, _)| *id)
+        };
+
+        let status_channel = find_channel_id("buildbot-status");
+        if let Some(id) = status_channel {
+            info!("Identified #{id} as buildbot-status channel in #{guild_id}");
+        } else {
+            info!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
+        }
+
+        let updates_channel = find_channel_id("buildbot-updates");
+        if let Some(id) = updates_channel {
+            info!("Identified #{id} as buildbot-updates channel in #{guild_id}");
+        } else {
+            warn!(
+                "No buildbot-updates channel in #{guild_id}; breakage updates will not be posted"
+            );
+        }
 
         let bot_user_id = ctx.cache.current_user().id;
         let http = ctx.http;
@@ -1158,40 +1202,46 @@ impl serenity::client::EventHandler for MessageHandler {
         }
 
         // Spawn the buildbot status broadcaster.
-        let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
-        let storage = self.storage.clone();
-        tokio::spawn(async move {
-            let mut server = ChannelServer {
-                bot_user_id,
-                status_channel,
-                updates_channel,
+        if status_channel.is_some() || updates_channel.is_some() {
+            let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
+            let storage = self.storage.clone();
+            tokio::spawn(async move {
+                let mut server = ChannelServer {
+                    bot_user_id,
+                    status_channel,
+                    updates_channel,
 
-                ui: None,
-                unsent_breakages: VecDeque::new(),
-                storage,
-            };
-            loop {
-                info!("Setting up bot status serving for guild #{guild_id}");
-                if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
-                    error!("Failed serving bot status for guild #{guild_id}: {x}");
+                    ui: None,
+                    unsent_breakages: VecDeque::new(),
+                    storage,
+                };
+                loop {
+                    info!("Setting up bot status serving for guild #{guild_id}");
+                    if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
+                        error!("Failed serving bot status for guild #{guild_id}: {x}");
+                    }
+
+                    if should_exit() {
+                        break;
+                    }
+
+                    // If we're seeing errors, it's probs best to sit back for a bit.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+
+                    // Double-check this, since there's a chance we saw errors related to an in-flight
+                    // shutdown notice.
+                    if should_exit() {
+                        break;
+                    }
                 }
 
-                if should_exit() {
-                    break;
-                }
-
-                // If we're seeing errors, it's probs best to sit back for a bit.
-                tokio::time::sleep(Duration::from_secs(30)).await;
-
-                // Double-check this, since there's a chance we saw errors related to an in-flight
-                // shutdown notice.
-                if should_exit() {
-                    break;
-                }
-            }
-
-            info!("Shut down bot status serving for #{guild_id}");
-        });
+                info!("Shut down bot status serving for #{guild_id}");
+            });
+        } else {
+            warn!(
+                "Neither buildbot-status nor buildbot-updates channel in #{guild_id}; skipping bot status serving"
+            );
+        }
     }
 
     async fn guild_delete(

@@ -16,8 +16,8 @@ The Bot provides the following automated services:
 
 ## 2. Server Integration and Message Management
 
-To function correctly, the Bot requires specific channels (e.g., `#buildbot-status` and `#buildbot-updates`). 
-* **Automated Moderation:** By adding the Bot, server administrators grant it permission to manage messages within its designated status channels. The Bot is designed to automatically delete any messages in these channels that were not authored by the Bot in order to keep the status feed clean.
+To post buildbot updates, the Bot requires designated channels (e.g., `#buildbot-updates` and optionally `#buildbot-status`). Servers can also use the Bot solely for calendar announcements without configuring buildbot channels.
+* **Automated Moderation:** If `#buildbot-status` is configured, server administrators grant the Bot permission to manage messages within that channel. The Bot is designed to automatically delete any messages in `#buildbot-status` that were not authored by the Bot in order to keep the status feed clean. The Bot does not delete messages in `#buildbot-updates` or any other channels.
 
 ## 3. Acceptable Use
 

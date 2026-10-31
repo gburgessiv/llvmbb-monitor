@@ -3,22 +3,18 @@
 ## Summary
 
 This is a simple bot that watches LLVM's upstream buildbots @
-http://lab.llvm.org/buildbot/#/console , and posts updates to two discord
-channels.
+http://lab.llvm.org/buildbot/#/console , and posts updates to Discord. It can also
+announce upcoming events from the LLVM community calendar (e.g. office hours).
 
-In order to use this bot, a discord server must exist and have the following two
-channels:
+In order to receive buildbot notifications, a discord server can have:
 
-- `#buildbot-status`
-- `#buildbot-updates`
+- `#buildbot-updates` (receives a new message whenever one or more bots are found to be newly-broken)
+- `#buildbot-status` (optional: summarizes the state of all upstream bots in a live dashboard)
 
-The bot assumes that no one posts in these channels but it. If
-someone-who-isn't-this-bot _does_ post in either of these channels, their
-messages may be deleted by the bot at some point in the future.
-
-`#buildbot-status` is a channel that summarizes the state of all upstream bots.
-`#buildbot-updates` gets a new message whenever one or more bots are found to be
-newly-broken.
+The bot assumes that no one posts in `#buildbot-status` but it. If
+someone-who-isn't-this-bot _does_ post in `#buildbot-status`, their
+messages may be deleted by the bot at some point in the future. The bot does not
+delete messages in `#buildbot-updates`.
 
 If you want this bot in your discord server, feel free to ping me and I'll send
 along an invite link.
