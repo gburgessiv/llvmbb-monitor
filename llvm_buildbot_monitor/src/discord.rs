@@ -666,7 +666,12 @@ fn find_exact_username_match(
     })
 }
 
-/// Resolves a single username to a UserId within a guild without requiring privileged intents.
+const MEMBER_SEARCH_LIMIT: u64 = 250;
+
+/// Resolves a single username to a UserId within a guild without streaming all members over Gateway.
+///
+/// Note: Discord's HTTP REST member search endpoint requires the `Server Members Intent`
+/// (`GUILD_MEMBERS`) to be enabled for the bot application in the Discord Developer Portal.
 async fn resolve_username_to_user_id(
     http: &Http,
     guild_id: GuildId,
@@ -677,7 +682,7 @@ async fn resolve_username_to_user_id(
     }
 
     let candidates: Vec<Member> = guild_id
-        .search_members(http, clean_name, Some(10))
+        .search_members(http, clean_name, Some(MEMBER_SEARCH_LIMIT))
         .await
         .with_context(|| format!("searching for member {clean_name:?} in guild {guild_id}"))?;
 
