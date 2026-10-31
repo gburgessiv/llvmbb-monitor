@@ -351,7 +351,7 @@ impl ChannelEventBroadcaster {
                                 }
                             }
                             Err(x) => {
-                                warn!("Failed updating channel list; ignoring: {x}");
+                                warn!("Failed updating channel list; ignoring: {x:#}");
                             }
                         }
                     }
@@ -413,7 +413,20 @@ impl ChannelEventBroadcaster {
         let mut last_channel_update = Instant::now();
 
         loop {
-            let next_broadcast = self.event_reader.recv().await?;
+            // Poll `should_exit` periodically even when no calendar events are firing, so
+            // refcount cleanups and task shutdowns aren't delayed indefinitely (especially on
+            // servers without buildbot channels where `ChannelServer` isn't running).
+            let next_broadcast =
+                match tokio::time::timeout(Duration::from_secs(60), self.event_reader.recv()).await
+                {
+                    Ok(res) => res?,
+                    Err(_elapsed) => {
+                        if should_exit() {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                };
             if should_exit() {
                 return Ok(());
             }
@@ -1138,31 +1151,6 @@ impl serenity::client::EventHandler for MessageHandler {
             })
         };
 
-        let find_channel_id = |name: &str| {
-            guild
-                .channels
-                .iter()
-                .find(|(_, x)| x.name == name)
-                .map(|(id, _)| *id)
-        };
-
-        let status_channel = find_channel_id("buildbot-status");
-        if let Some(id) = status_channel {
-            info!("Identified #{id} as buildbot-status channel in #{guild_id}");
-        } else {
-            warn!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
-        }
-
-        let updates_channel = find_channel_id("buildbot-updates");
-        if let Some(id) = updates_channel {
-            info!("Identified #{id} as buildbot-updates channel in #{guild_id}");
-        } else {
-            warn!(
-                "No buildbot-updates channel in #{guild_id}; breakage updates will not be posted"
-            );
-        }
-
-        let bot_user_id = ctx.cache.current_user().id;
         let http = ctx.http;
         // Spawn the calendar event broadcaster.
         {
@@ -1180,7 +1168,7 @@ impl serenity::client::EventHandler for MessageHandler {
                 loop {
                     info!("Setting up event broadcasting for guild #{guild_id}");
                     if let Err(x) = broadcaster.serve(&http, &*should_exit).await {
-                        error!("Failed broadcasting events for guild #{guild_id}: {x}");
+                        error!("Failed broadcasting events for guild #{guild_id}: {x:#}");
                     }
 
                     if should_exit() {
@@ -1202,46 +1190,71 @@ impl serenity::client::EventHandler for MessageHandler {
         }
 
         // Spawn the buildbot status broadcaster.
-        if status_channel.is_some() || updates_channel.is_some() {
-            let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
-            let storage = self.storage.clone();
-            tokio::spawn(async move {
-                let mut server = ChannelServer {
-                    bot_user_id,
-                    status_channel,
-                    updates_channel,
-
-                    ui: None,
-                    unsent_breakages: VecDeque::new(),
-                    storage,
-                };
-                loop {
-                    info!("Setting up bot status serving for guild #{guild_id}");
-                    if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
-                        error!("Failed serving bot status for guild #{guild_id}: {x}");
-                    }
-
-                    if should_exit() {
-                        break;
-                    }
-
-                    // If we're seeing errors, it's probs best to sit back for a bit.
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-
-                    // Double-check this, since there's a chance we saw errors related to an in-flight
-                    // shutdown notice.
-                    if should_exit() {
-                        break;
-                    }
-                }
-
-                info!("Shut down bot status serving for #{guild_id}");
-            });
-        } else {
+        let find_channel_id = |name: &str| {
+            guild
+                .channels
+                .iter()
+                .find(|(_, x)| x.name == name)
+                .map(|(id, _)| *id)
+        };
+        let status_channel = find_channel_id("buildbot-status");
+        let updates_channel = find_channel_id("buildbot-updates");
+        if status_channel.is_none() && updates_channel.is_none() {
             warn!(
                 "Neither buildbot-status nor buildbot-updates channel in #{guild_id}; skipping bot status serving"
             );
+            return;
         }
+
+        if let Some(id) = status_channel {
+            info!("Identified #{id} as buildbot-status channel in #{guild_id}");
+        } else {
+            warn!("No buildbot-status channel in #{guild_id}; status updates will not be posted");
+        }
+
+        if let Some(id) = updates_channel {
+            info!("Identified #{id} as buildbot-updates channel in #{guild_id}");
+        } else {
+            warn!(
+                "No buildbot-updates channel in #{guild_id}; breakage updates will not be posted"
+            );
+        }
+
+        let bot_user_id = ctx.cache.current_user().id;
+        let mut pubsub_reader = UIBroadcaster::receiver(&self.ui_broadcaster);
+        let storage = self.storage.clone();
+        tokio::spawn(async move {
+            let mut server = ChannelServer {
+                bot_user_id,
+                status_channel,
+                updates_channel,
+
+                ui: None,
+                unsent_breakages: VecDeque::new(),
+                storage,
+            };
+            loop {
+                info!("Setting up bot status serving for guild #{guild_id}");
+                if let Err(x) = server.serve(&http, &mut pubsub_reader, &*should_exit).await {
+                    error!("Failed serving bot status for guild #{guild_id}: {x:#}");
+                }
+
+                if should_exit() {
+                    break;
+                }
+
+                // If we're seeing errors, it's probs best to sit back for a bit.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+
+                // Double-check this, since there's a chance we saw errors related to an in-flight
+                // shutdown notice.
+                if should_exit() {
+                    break;
+                }
+            }
+
+            info!("Shut down bot status serving for #{guild_id}");
+        });
     }
 
     async fn guild_delete(
