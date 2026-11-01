@@ -80,16 +80,7 @@ where
         };
 
         let min_index = min_offset - self.base_offset;
-        if min_index == 0 {
-            return;
-        }
-
-        let mut i = 0usize;
-        self.values.retain(|_| {
-            let keep = i >= min_index;
-            i += 1;
-            keep
-        });
+        self.values.drain(..min_index);
         self.base_offset += min_index;
     }
 
@@ -1927,6 +1918,120 @@ mod test {
         vec.unregister(&token);
         vec.compact();
         assert!(vec.values.is_empty());
+    }
+
+    #[test]
+    fn test_infinite_vec_post_compact_operations_and_wraparound() {
+        let mut vec = InfiniteVec::<i32>::default();
+        let token_a = vec.register();
+
+        vec.extend(0..5);
+        assert_eq!(vec.get_all(&token_a), &[0, 1, 2, 3, 4]);
+
+        // Leave [5, 6, 7] unread when compacting so base_offset > 0 and values is non-empty.
+        vec.extend(5..8);
+        vec.compact();
+        assert_eq!(vec.values.len(), 3);
+
+        // Register while base_offset > 0 and values is non-empty, then extend enough to wrap a
+        // ring buffer if backed by VecDeque.
+        let token_b = vec.register();
+        vec.extend(8..12);
+        assert_eq!(vec.get_all(&token_a), &[5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(vec.get_all(&token_b), &[8, 9, 10, 11]);
+
+        // Partial compact across the wrap boundary, followed by full compact.
+        vec.extend(12..15);
+        vec.compact();
+        assert_eq!(vec.values.len(), 3);
+        assert_eq!(vec.get_all(&token_a), &[12, 13, 14]);
+        assert_eq!(vec.get_all(&token_b), &[12, 13, 14]);
+        vec.compact();
+        assert!(vec.values.is_empty());
+
+        // Register while base_offset > 0 and values is empty.
+        let token_c = vec.register();
+        vec.extend(std::iter::empty());
+        assert!(vec.get_all(&token_c).is_empty());
+
+        vec.extend([15, 16]);
+        assert_eq!(vec.get_all(&token_a), &[15, 16]);
+        assert_eq!(vec.get_all(&token_b), &[15, 16]);
+        assert_eq!(vec.get_all(&token_c), &[15, 16]);
+    }
+
+    #[test]
+    fn test_infinite_vec_compact_noop_when_reader_at_base() {
+        let mut vec = InfiniteVec::<i32>::default();
+        vec.compact();
+        assert!(vec.values.is_empty());
+
+        let token = vec.register();
+        vec.extend([1, 2]);
+        vec.compact();
+        assert_eq!(vec.values.len(), 2);
+        assert_eq!(vec.get_all(&token), &[1, 2]);
+
+        vec.extend([3]);
+        vec.compact();
+        assert_eq!(vec.values.len(), 1);
+
+        // Reader is now at base_offset (> 0); another compact before reading must keep [3, 4].
+        vec.extend([4]);
+        vec.compact();
+        assert_eq!(vec.values.len(), 2);
+        assert_eq!(vec.get_all(&token), &[3, 4]);
+    }
+
+    #[test]
+    fn test_infinite_vec_unregister_unblocks_compaction() {
+        let mut vec = InfiniteVec::<i32>::default();
+        let lagging = vec.register();
+        let ahead = vec.register();
+
+        vec.extend([1, 2, 3]);
+        assert_eq!(vec.get_all(&ahead), &[1, 2, 3]);
+        vec.extend([4, 5]);
+
+        // Compaction is blocked while `lagging` has not read.
+        let also_ahead = vec.register();
+        vec.unregister(&also_ahead);
+        vec.compact();
+        assert_eq!(vec.values.len(), 5);
+
+        // Unregistering the slowest reader lets compaction advance to `ahead`'s offset.
+        vec.unregister(&lagging);
+        vec.compact();
+        assert_eq!(vec.values.len(), 2);
+        assert_eq!(vec.get_all(&ahead), &[4, 5]);
+
+        // Unregistering the last reader after base_offset > 0 clears values cleanly for new ones.
+        vec.extend([6]);
+        vec.unregister(&ahead);
+        vec.compact();
+        assert!(vec.values.is_empty());
+
+        let fresh = vec.register();
+        vec.extend([7, 8]);
+        assert_eq!(vec.get_all(&fresh), &[7, 8]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unknown token")]
+    fn test_infinite_vec_get_all_after_unregister_panics() {
+        let mut vec = InfiniteVec::<i32>::default();
+        let token = vec.register();
+        vec.unregister(&token);
+        vec.get_all(&token);
+    }
+
+    #[test]
+    #[should_panic(expected = "Removing non-existing token")]
+    fn test_infinite_vec_double_unregister_panics() {
+        let mut vec = InfiniteVec::<i32>::default();
+        let token = vec.register();
+        vec.unregister(&token);
+        vec.unregister(&token);
     }
 
     #[test]
