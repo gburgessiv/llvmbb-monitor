@@ -87,12 +87,12 @@ RUN \
   groupadd -g 1000 llvmbb_monitor && \
   useradd -u 1000 -g 1000 llvmbb_monitor -s /bin/bash -d /home/llvmbb_monitor && \
   mkdir -p /home/llvmbb_monitor/llvm_buildbot_monitor /db && \
-  chown -R llvmbb_monitor:llvmbb_monitor /home/llvmbb_monitor /db
+  chown llvmbb_monitor:llvmbb_monitor /db
 USER 1000:1000
 WORKDIR /home/llvmbb_monitor
 
-COPY --chmod=555 docker/run_buildbot_monitor.sh .
-COPY --from=build \
+COPY --chown=root:root --chmod=555 docker/run_buildbot_monitor.sh .
+COPY --from=build --chown=root:root --chmod=555 \
   /home/llvmbb_monitor/code/target/release/llvm_buildbot_monitor \
   llvm_buildbot_monitor/
 
