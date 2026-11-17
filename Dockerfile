@@ -8,8 +8,7 @@ RUN apt-get install -y \
   curl \
   git \
   libssl-dev \
-  pkg-config \
-  sqlite3
+  pkg-config
 
 # Set up the base user.
 RUN \
@@ -82,8 +81,7 @@ ENV LANG=C.UTF-8
 
 RUN apt-get install -y \
   ca-certificates \
-  libssl-dev \
-  sqlite3
+  libssl3t64
 
 RUN \
   groupadd -g 1000 llvmbb_monitor && \
