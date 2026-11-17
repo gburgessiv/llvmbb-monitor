@@ -300,7 +300,13 @@ fn init_logger_or_die() {
 #[derive(Parser)]
 struct Opts {
     /// Discord token to use. Required unless a --debug-only-fetch-* flag is set.
-    #[clap(long, required_unless_present_any = ["debug_only_fetch_greendragon", "debug_only_fetch_lab"])]
+    #[clap(
+        long,
+        env = "DISCORD_TOKEN",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        required_unless_present_any = ["debug_only_fetch_greendragon", "debug_only_fetch_lab"],
+    )]
     discord_token: Option<String>,
     /// Path to the database to use. Required unless a --debug-only-fetch-* flag is set.
     #[clap(long, required_unless_present_any = ["debug_only_fetch_greendragon", "debug_only_fetch_lab"])]
@@ -468,5 +474,35 @@ mod email_tests {
         );
         // Empty domain.
         assert_eq!(Email::parse("user@"), Some(Email::from_parts("user", "")));
+    }
+}
+
+#[cfg(test)]
+mod opts_tests {
+    use std::ffi::OsStr;
+
+    use clap::{CommandFactory, Parser};
+
+    use super::Opts;
+
+    #[test]
+    fn verify_cli() {
+        Opts::command().debug_assert();
+    }
+
+    #[test]
+    fn discord_token_configured_from_env_and_hidden() {
+        let cmd = Opts::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "discord_token")
+            .expect("discord_token arg exists");
+        assert_eq!(arg.get_env(), Some(OsStr::new("DISCORD_TOKEN")));
+        assert!(arg.is_hide_env_values_set());
+    }
+
+    #[test]
+    fn empty_discord_token_rejected() {
+        assert!(Opts::try_parse_from(["bot", "--discord-token=", "--database=/db"]).is_err());
     }
 }
