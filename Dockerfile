@@ -3,8 +3,10 @@ FROM debian:stable-slim AS build-baseline
 RUN apt-get update
 ENV LANG=C.UTF-8
 
-RUN apt-get install -y \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get install -y --no-install-recommends \
   build-essential \
+  ca-certificates \
   curl \
   git \
   libssl-dev \
@@ -76,7 +78,8 @@ FROM debian:stable-slim
 RUN apt-get update
 ENV LANG=C.UTF-8
 
-RUN apt-get install -y \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get install -y --no-install-recommends \
   ca-certificates \
   libssl3t64
 
