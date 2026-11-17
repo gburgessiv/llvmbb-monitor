@@ -26,8 +26,6 @@ ENV PATH="$PATH:/home/llvmbb_monitor/.cargo/bin"
 
 # Set up a baseline build so any non-dependency-touching changes to src/ and
 # such do incremental builds.
-# TODO: Is the `cargo vendor` necessary? Feels bad to use it to just populate
-# .cargo's cache.
 COPY --chown=llvmbb_monitor:llvmbb_monitor Cargo.lock Cargo.toml code/
 COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/Cargo.toml code/calendar_check/Cargo.toml
 COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/Cargo.toml code/llvm_buildbot_monitor/Cargo.toml
@@ -35,10 +33,10 @@ RUN \
   mkdir -p code/calendar_check/src && \
   mkdir -p code/llvm_buildbot_monitor/src && \
   cd code && \
+  touch calendar_check/src/lib.rs && \
   echo 'fn main() {}' > calendar_check/src/main.rs && \
   echo 'fn main() {}' > llvm_buildbot_monitor/src/main.rs && \
-  cargo vendor && \
-  rm -rf vendor
+  cargo fetch --locked
 
 # Test container
 FROM build-baseline AS test-container
@@ -47,14 +45,14 @@ FROM build-baseline AS test-container
 # properly.
 RUN \
   cd code && \
-  cargo build --offline --locked && \
-  cargo clean
+  cargo test --no-run --offline --locked && \
+  cargo clean -p calendar_check -p llvm_buildbot_monitor
 
 # Bring in sources & test go brrr.
 COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/ code/calendar_check/
 COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/llvm_buildbot_monitor/
 COPY --chown=llvmbb_monitor:llvmbb_monitor .git/ code/.git
-RUN cd code && cargo test
+RUN cd code && cargo test --offline --locked
 
 # Release build container.
 FROM build-baseline AS build
@@ -63,15 +61,14 @@ FROM build-baseline AS build
 # properly.
 RUN \
   cd code && \
-  cargo build --release --offline --locked && \
-  cargo clean -r -p calendar_check && \
-  cargo clean -r -p llvm_buildbot_monitor
+  cargo build --release --offline --locked --bin llvm_buildbot_monitor && \
+  cargo clean -r -p calendar_check -p llvm_buildbot_monitor
 
 # Bring in sources & test go brrr.
 COPY --chown=llvmbb_monitor:llvmbb_monitor calendar_check/ code/calendar_check/
 COPY --chown=llvmbb_monitor:llvmbb_monitor llvm_buildbot_monitor/ code/llvm_buildbot_monitor/
 COPY --chown=llvmbb_monitor:llvmbb_monitor .git/ code/.git
-RUN cd code && cargo build --release --workspace
+RUN cd code && cargo build --release --offline --locked --bin llvm_buildbot_monitor
 
 # Now build the actual image.
 FROM debian:stable-slim
