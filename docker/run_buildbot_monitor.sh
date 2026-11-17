@@ -7,7 +7,6 @@ fi
 
 exec_mon() {
   exec ./llvm_buildbot_monitor/llvm_buildbot_monitor \
-    --discord-token="${DISCORD_TOKEN}" \
     --database=/db/db.sqlite3
 }
 
