@@ -6,7 +6,7 @@ if [[ -z "${DISCORD_TOKEN:-}" ]]; then
 fi
 
 exec_mon() {
-  ./llvm_buildbot_monitor/llvm_buildbot_monitor \
+  exec ./llvm_buildbot_monitor/llvm_buildbot_monitor \
     --discord-token="${DISCORD_TOKEN}" \
     --database=/db/db.sqlite3
 }
@@ -14,7 +14,6 @@ exec_mon() {
 if ! [[ -d "/logs" ]]; then
   echo "Logging output to stdout, due to lack of /logs dir."
   exec_mon
-  exit 1
 fi
 
 log_file="/logs/$(date "+%F-%T").log"

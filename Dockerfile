@@ -96,4 +96,4 @@ COPY --from=build --chown=root:root --chmod=555 \
   /home/llvmbb_monitor/code/target/release/llvm_buildbot_monitor \
   llvm_buildbot_monitor/
 
-CMD ["bash", "-eu", "run_buildbot_monitor.sh"]
+ENTRYPOINT ["/home/llvmbb_monitor/run_buildbot_monitor.sh"]
